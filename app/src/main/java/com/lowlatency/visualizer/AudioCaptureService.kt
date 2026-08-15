@@ -327,9 +327,13 @@ class AudioCaptureService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // Swiping the app from recents kills the task without the activity's
-        // onDestroy necessarily running — don't keep capturing for nobody.
-        stopSelf()
+        // The capture service is intentionally independent from the Activity
+        // task. Leaving/swiping the app must not terminate screen/audio capture:
+        // Hue synchronization has to continue while the video player is
+        // running in the foreground.
+        //
+        // MediaProjection is owned by this foreground service, so keep the
+        // service alive until the explicit Stop action or projection shutdown.
         super.onTaskRemoved(rootIntent)
     }
 
