@@ -37,6 +37,13 @@ class HueLightController(context: Context) {
     @Volatile private var high = 0f
     private val screenRgb = FloatArray(ScreenSyncBus.COMPONENTS)
 
+    // Smooth the spectrum before turning it into Hue colours. Raw 20 ms audio
+    // blocks are too twitchy for room lighting; the lights should follow the
+    // musical envelope rather than every FFT-sized fluctuation.
+    private var smoothLow = 0f
+    private var smoothMid = 0f
+    private var smoothHigh = 0f
+
     @Volatile private var running = false
     @Volatile var paused = false        // true while app is backgrounded; sender drops to 1 Hz keepalive
     private var senderThread: Thread? = null
@@ -224,9 +231,18 @@ class HueLightController(context: Context) {
                 }
 
                 val systemAudio = BeatSettings.systemAudio
-                val l = if (systemAudio) AudioSyncBus.low else low
-                val m = if (systemAudio) AudioSyncBus.mid else mid
-                val h = if (systemAudio) AudioSyncBus.high else high
+                val rawL = if (systemAudio) AudioSyncBus.low else low
+                val rawM = if (systemAudio) AudioSyncBus.mid else mid
+                val rawH = if (systemAudio) AudioSyncBus.high else high
+                // ~120 ms attack/release smoothing at 50 Hz. This makes colour
+                // changes musical instead of flickering with individual samples.
+                smoothLow += 0.14f * (rawL - smoothLow)
+                smoothMid += 0.14f * (rawM - smoothMid)
+                smoothHigh += 0.14f * (rawH - smoothHigh)
+
+                val l = smoothLow
+                val m = smoothMid
+                val h = smoothHigh
                 val audioLoudness = if (systemAudio) AudioSyncBus.loudness else BeatBus.loudness
                 val audioBassRatio = if (systemAudio) AudioSyncBus.bassRatio else BeatBus.bassRatio
                 val audioBeatCount = if (systemAudio) AudioSyncBus.beatCount else BeatBus.beatCount
@@ -296,7 +312,13 @@ class HueLightController(context: Context) {
                     // fire on (shared BeatBus), scaled by loudness; colour follows
                     // the spectrum bands.
                     val bc = audioBeatCount
-                    if (bc != lastBeat) { flash = audioLoudness; lastBeat = bc; lightBeatCount++ }
+                    if (bc != lastBeat) {
+                        // Beat controls a slower, visible colour/brightness pulse.
+                        // Keep the strongest pulse when beats arrive close together.
+                        flash = maxOf(flash, audioLoudness)
+                        lastBeat = bc
+                        lightBeatCount++
+                    }
                     flash *= FLASH_DECAY
                     if (ScreenSyncBus.active &&
                         ScreenSyncBus.snapshotInto(screenRgb)
@@ -344,7 +366,15 @@ class HueLightController(context: Context) {
     ) {
         if (count <= 0) return
 
+        val total = low + mid + high + 1e-3f
+        // Spectral balance: bass -> red, mids -> magenta/purple, treble -> blue.
+        val centroid = ((mid * 0.5f + high) / total).coerceIn(0f, 1f)
         val value = LightingSettings.audioBrightnessValue(low, mid, high, flash)
+        val pulse = flash.coerceIn(0f, 1f)
+        // A beat briefly pulls the hue toward the bass colour as well as raising
+        // brightness, so beats are visually distinct rather than just louder.
+        val beatHueShift = -28f * pulse
+        val sat = (0.90f + 0.08f * pulse).coerceIn(0.90f, 1f)
 
         for (i in 0 until count) {
             val zone = if (count == 1) {
@@ -357,10 +387,23 @@ class HueLightController(context: Context) {
 
             val src = zone * 3
             val dst = i * 3
+            val spread = if (count > 1) {
+                (i.toFloat() / (count - 1) - 0.5f) * AUDIO_CHANNEL_SPREAD * 40f
+            } else 0f
+            val hue = AUDIO_HUE_BASS +
+                (AUDIO_HUE_TREBLE - AUDIO_HUE_BASS) * centroid +
+                spread + beatHueShift
 
-            out[dst] = (screen[src] * value).coerceIn(0f, 1f)
-            out[dst + 1] = (screen[src + 1] * value).coerceIn(0f, 1f)
-            out[dst + 2] = (screen[src + 2] * value).coerceIn(0f, 1f)
+            hsvToRgb(hue, sat, value)
+
+            // Keep some of the video's spatial colour, but let the music's
+            // frequency determine the dominant hue. This avoids every light
+            // becoming the same colour when the captured video is uniform.
+            val screenWeight = 0.25f
+            val audioWeight = 1f - screenWeight
+            out[dst] = (hsvOut[0] * audioWeight + screen[src] * screenWeight).coerceIn(0f, 1f)
+            out[dst + 1] = (hsvOut[1] * audioWeight + screen[src + 1] * screenWeight).coerceIn(0f, 1f)
+            out[dst + 2] = (hsvOut[2] * audioWeight + screen[src + 2] * screenWeight).coerceIn(0f, 1f)
         }
     }
 
@@ -418,7 +461,7 @@ class HueLightController(context: Context) {
         private const val TAG = "HueLightController"
         private const val SEND_HZ = 50L          // Hue Entertainment caps ~50–60 Hz
         private const val SPIN_MARGIN_NS = 2_000_000L  // spin-wait the last 2ms for precise timing
-        private const val FLASH_DECAY = 0.80f     // per-frame flash falloff (~50 Hz)
+        private const val FLASH_DECAY = 0.94f     // per-frame flash falloff (~50 Hz)
 
         // Brightness floor, beat-flash amplitude and the resting glow are now shared
         // across all brands in LightingSettings (so presets behave identically).
