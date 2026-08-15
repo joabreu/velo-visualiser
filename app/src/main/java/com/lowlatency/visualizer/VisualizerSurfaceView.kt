@@ -10,7 +10,6 @@ import android.view.MotionEvent
 import android.view.Surface
 import android.view.VelocityTracker
 import android.view.ViewConfiguration
-import com.lowlatency.visualizer.gl.HdrEGLConfigChooser
 import com.lowlatency.visualizer.gl.VisualizerRenderer
 import kotlin.math.abs
 
@@ -46,6 +45,11 @@ class VisualizerSurfaceView @JvmOverloads constructor(
 
     /** Invoked on a single tap (no GL coupling — pure UI intent). */
     var onTap: (() -> Unit)? = null
+
+    /** Android TV / D-pad equivalents for the touch gestures. */
+    var onDpadUp: (() -> Unit)? = null
+    var onDpadDown: (() -> Unit)? = null
+    var onDpadCenter: (() -> Unit)? = null
 
     /**
      * Interactive swipe-up-to-open-menu, driven by raw touch so the sheet can
@@ -239,15 +243,58 @@ class VisualizerSurfaceView @JvmOverloads constructor(
         // to the visualizer surface itself (complements the window-level
         // FLAG_KEEP_SCREEN_ON set in MainActivity.onCreate).
         keepScreenOn = true
+        // Take focus so Android TV D-pad events reach the visualizer surface.
+        isFocusable = true
+        isFocusableInTouchMode = true
+        requestFocus()
 
         // ES 3.x context: required for the Fluid scene's compute shaders /
         // SSBOs. Backward-compatible — the GLES20-based scenes keep working.
         setEGLContextClientVersion(3)
-        // HDR: pick an FP16 (or 10-bit) framebuffer so >1.0 fragment output is
-        // preserved. Must be applied BEFORE setRenderer().
-        setEGLConfigChooser(HdrEGLConfigChooser())
+        // Use the platform's standard RGBA8888 EGL configuration.
+        // The previous HDR/FP16 chooser can produce an invalid/degenerate
+        // surface on some Android TV GPU/EGL implementations.
+        setEGLConfigChooser(8, 8, 8, 8, 16, 0)
         setRenderer(renderer)
         renderMode = RENDERMODE_CONTINUOUSLY
+    }
+
+    override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        // Let BACK be handled by MainActivity's OnBackPressedDispatcher.
+        when (keyCode) {
+            android.view.KeyEvent.KEYCODE_DPAD_LEFT -> {
+                if (!isMenuOpen) {
+                    swipeScene(-1)
+                    return true
+                }
+            }
+            android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                if (!isMenuOpen) {
+                    swipeScene(1)
+                    return true
+                }
+            }
+            android.view.KeyEvent.KEYCODE_DPAD_UP -> {
+                if (!isMenuOpen) {
+                    onDpadUp?.invoke()
+                    return true
+                }
+            }
+            android.view.KeyEvent.KEYCODE_DPAD_DOWN -> {
+                if (!isMenuOpen) {
+                    onDpadDown?.invoke()
+                    return true
+                }
+            }
+            android.view.KeyEvent.KEYCODE_DPAD_CENTER,
+            android.view.KeyEvent.KEYCODE_ENTER -> {
+                if (!isMenuOpen) {
+                    onDpadCenter?.invoke()
+                    return true
+                }
+            }
+        }
+        return super.onKeyDown(keyCode, event)
     }
 
     @Suppress("ClickableViewAccessibility")

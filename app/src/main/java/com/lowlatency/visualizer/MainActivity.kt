@@ -486,6 +486,20 @@ class MainActivity : AppCompatActivity() {
                 localPlaybackController.onCanvasTap()
             }
         }
+        // Android TV remote controls (when the menu is closed):
+        // LEFT/RIGHT -> previous/next visualizer (handled by glView)
+        // UP         -> open the settings sheet
+        // DOWN       -> no-op (reserved for future TV navigation)
+        // CENTER     -> same action as the canvas tap
+        glView.onDpadUp = { menuSheetController.open() }
+        glView.onDpadDown = { /* reserved */ }
+        glView.onDpadCenter = {
+            if (::toneController.isInitialized && audioSourceController.isToneMode) {
+                toneController.onCanvasTap()
+            } else {
+                localPlaybackController.onCanvasTap()
+            }
+        }
     }
 
     // ----- Settings tabs: Visuals | Lighting | Settings -----
