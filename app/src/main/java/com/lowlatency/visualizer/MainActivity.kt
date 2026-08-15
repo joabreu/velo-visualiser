@@ -1270,7 +1270,13 @@ class MainActivity : AppCompatActivity() {
         if (::toneController.isInitialized) toneController.onPause()
         backgroundedAtMs = SystemClock.elapsedRealtime()
         if (::perfOverlayController.isInitialized) perfOverlayController.onPause()
-        if (::lightingController.isInitialized) lightingController.onPause()
+        // SYSTEM capture owns a foreground service and Hue must continue
+        // streaming while the Activity is no longer visible. Do not put the
+        // Hue sender into its background/silent state in this case.
+        if (::lightingController.isInitialized &&
+            ::audioSourceController.isInitialized &&
+            !audioSourceController.systemAudioMode
+        ) lightingController.onPause()
         if (::displayModeController.isInitialized) displayModeController.onPause()
         if (::shuffleController.isInitialized) shuffleController.onPause()
         if (::linkSyncController.isInitialized) linkSyncController.onPause()
@@ -1279,13 +1285,24 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         if (::perfOverlayController.isInitialized) perfOverlayController.onDestroy()
-        if (::lightingController.isInitialized) lightingController.onDestroy()
+        // When SYSTEM capture is active, AudioCaptureService is deliberately
+        // independent of the Activity. Keep the Hue sender alive as well;
+        // otherwise LightingController.onDestroy() calls hueController.disable()
+        // and explicitly releases the Hue entertainment stream.
+        if (::lightingController.isInitialized &&
+            ::audioSourceController.isInitialized &&
+            !audioSourceController.systemAudioMode
+        ) lightingController.onDestroy()
         if (::displayModeController.isInitialized) displayModeController.onDestroy()
         if (::shuffleController.isInitialized) shuffleController.onDestroy()
         if (::secondaryDisplayController.isInitialized) secondaryDisplayController.onDestroy()
         if (::hapticController.isInitialized) hapticController.release()
         if (::linkSyncController.isInitialized) linkSyncController.onDestroy()
-        if (::audioSourceController.isInitialized) audioSourceController.onDestroy()
+        // Do not stop AudioCaptureService here: it owns the MediaProjection
+        // and intentionally survives removal of the Activity task.
+        if (::audioSourceController.isInitialized &&
+            !audioSourceController.systemAudioMode
+        ) audioSourceController.onDestroy()
         if (::inputDeviceController.isInitialized) inputDeviceController.onDestroy()
         if (::toneController.isInitialized) toneController.onDestroy()
         if (::feelTheSpeedController.isInitialized) feelTheSpeedController.onDestroy()
