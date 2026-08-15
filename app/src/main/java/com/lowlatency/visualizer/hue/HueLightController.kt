@@ -4,7 +4,10 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.lowlatency.visualizer.AudioSyncBus
 import com.lowlatency.visualizer.BeatBus
+import com.lowlatency.visualizer.BeatSettings
+import com.lowlatency.visualizer.CaptureHealth
 import com.lowlatency.visualizer.LightingSettings
 import com.lowlatency.visualizer.LinkSync
 import com.lowlatency.visualizer.NativeBridge
@@ -169,25 +172,49 @@ class HueLightController(context: Context) {
             var beatR = 1f; var beatG = 1f; var beatB = 1f
             val frameNs = 1_000_000_000L / SEND_HZ
             var linkBeatFired = false
+            var lastWatchdogLogNs = 0L
 
             while (running) {
                 val t0 = System.nanoTime()
 
+                val nowNs = System.nanoTime()
+                val screenFresh = CaptureHealth.screenFresh(nowNs)
+                val rawAudioFresh = CaptureHealth.rawAudioFresh(nowNs)
+                val analysisFresh = CaptureHealth.audioAnalysisFresh(nowNs)
+
+                // Watchdog: do not let a dead capture path masquerade as live data.
+                // We retain the last good RGB frame rather than sending black, but
+                // record the stale source so the condition is diagnosable.
+                if (nowNs - lastWatchdogLogNs > 2_000_000_000L &&
+                    (!screenFresh || !rawAudioFresh || !analysisFresh)
+                ) {
+                    Log.w(
+                        TAG,
+                        "Capture freshness: screen=${CaptureHealth.screenAgeMs(nowNs)}ms " +
+                            "rawAudio=${CaptureHealth.rawAudioAgeMs(nowNs)}ms " +
+                            "analysis=${CaptureHealth.audioAnalysisAgeMs(nowNs)}ms"
+                    )
+                    lastWatchdogLogNs = nowNs
+                }
+
                 if (paused) {
-                    // If the Activity is backgrounded, keep the Hue stream alive
-                    // with the latest screen colours. Never send a black frame:
-                    // the video player remains on the display and ScreenSyncBus
-                    // continues to receive MediaProjection frames.
-                    if (ScreenSyncBus.active &&
+                    // The Activity can be gone while the foreground service keeps
+                    // capturing. In background we deliberately use only data that
+                    // is known to be fresh; never reuse stale audio analysis.
+                    if (screenFresh && ScreenSyncBus.active &&
                         ScreenSyncBus.snapshotInto(screenRgb)
                     ) {
+                        val al = if (BeatSettings.systemAudio && analysisFresh) AudioSyncBus.low else if (analysisFresh) low else 0f
+                        val am = if (BeatSettings.systemAudio && analysisFresh) AudioSyncBus.mid else if (analysisFresh) mid else 0f
+                        val ah = if (BeatSettings.systemAudio && analysisFresh) AudioSyncBus.high else if (analysisFresh) high else 0f
+                        val af = if (BeatSettings.systemAudio && analysisFresh) AudioSyncBus.loudness else if (analysisFresh) BeatBus.loudness else 0f
                         mapScreenColors(
                             channelIds.size,
                             screenRgb,
-                            low = 0f,
-                            mid = 0f,
-                            high = 0f,
-                            flash = 0f,
+                            low = al,
+                            mid = am,
+                            high = ah,
+                            flash = af,
                             out = rgb
                         )
                     }
@@ -196,9 +223,18 @@ class HueLightController(context: Context) {
                     continue
                 }
 
-                val l = low; val m = mid; val h = high
+                val systemAudio = BeatSettings.systemAudio
+                val l = if (systemAudio) AudioSyncBus.low else low
+                val m = if (systemAudio) AudioSyncBus.mid else mid
+                val h = if (systemAudio) AudioSyncBus.high else high
+                val audioLoudness = if (systemAudio) AudioSyncBus.loudness else BeatBus.loudness
+                val audioBassRatio = if (systemAudio) AudioSyncBus.bassRatio else BeatBus.bassRatio
+                val audioBeatCount = if (systemAudio) AudioSyncBus.beatCount else BeatBus.beatCount
 
-                if (LinkSync.enabled) {
+                // Ableton Link's beat polling belongs to the GL thread. For system
+                // playback we instead use the service-owned audio analysis so the
+                // Hue stream remains fully live after the Activity is backgrounded.
+                if (LinkSync.enabled && !systemAudio) {
                     // Beat-strobe: dark between Link beats; on each beat flash a
                     // colour chosen by bass presence. The gate, intensity and
                     // colour all come from the shared BeatBus — the same gate the
@@ -234,10 +270,10 @@ class HueLightController(context: Context) {
 
                     // Honour the gate and the user's "disable light beat" toggle.
                     if (shouldFlash && cfg.linkBeatFlashEnabled && BeatBus.gateOpen) {
-                        flash = cfg.beatFlashAmp(BeatBus.loudness)
+                        flash = cfg.beatFlashAmp(audioLoudness)
                         lightBeatCount++
 
-                        val ct = ((BeatBus.bassRatio - cfg.bassLo) / (cfg.bassHi - cfg.bassLo)).coerceIn(0f, 1f)
+                        val ct = ((audioBassRatio - cfg.bassLo) / (cfg.bassHi - cfg.bassLo)).coerceIn(0f, 1f)
                         val cs = ct * ct * (3f - 2f * ct)
                         val hue = RED_HUE + (PURPLE_HUE - RED_HUE) * cs
                         val sat = SAT_TREBLE + (SAT_BASS - SAT_TREBLE) * cs
@@ -259,8 +295,8 @@ class HueLightController(context: Context) {
                     // Audio mode: flash on the very same gated beat the visuals
                     // fire on (shared BeatBus), scaled by loudness; colour follows
                     // the spectrum bands.
-                    val bc = BeatBus.beatCount
-                    if (bc != lastBeat) { flash = BeatBus.loudness; lastBeat = bc; lightBeatCount++ }
+                    val bc = audioBeatCount
+                    if (bc != lastBeat) { flash = audioLoudness; lastBeat = bc; lightBeatCount++ }
                     flash *= FLASH_DECAY
                     if (ScreenSyncBus.active &&
                         ScreenSyncBus.snapshotInto(screenRgb)

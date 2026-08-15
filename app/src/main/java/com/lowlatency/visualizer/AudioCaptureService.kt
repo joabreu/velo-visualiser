@@ -27,6 +27,7 @@ import androidx.annotation.RequiresPermission
 import androidx.core.content.IntentCompat
 import kotlin.concurrent.thread
 import kotlin.math.max
+import kotlin.math.sqrt
 
 /**
  * Foreground service that owns a MediaProjection session and captures *system
@@ -94,6 +95,17 @@ class AudioCaptureService : Service() {
     private var screenThread: HandlerThread? = null
     private var screenHandler: Handler? = null
     private val screenAnalyzer = ScreenColorAnalyzer()
+
+    // Background audio analysis state. This deliberately lives in the foreground
+    // service rather than VisualizerRenderer so system-audio/Hue sync survives
+    // Home/task removal.
+    private val backgroundBeatDetector = BeatDetector()
+    private var bassLp = 0f
+    private var midLp = 0f
+    private var levelFollow = 0f
+    private var bassRatioSmooth = 0.5f
+    private val beatWindow = FloatArray(1024)
+    private var beatWindowCount = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -214,6 +226,8 @@ class AudioCaptureService : Service() {
             while (capturing) {
                 val read = record?.read(buf, 0, buf.size) ?: -1
                 if (read > 0) {
+                    CaptureHealth.markRawAudio()
+                    analysePlaybackAudio(buf, read)
                     NativeBridge.nativePushPcm(buf, read / CHANNELS, CHANNELS, SYSTEM_AUDIO_GAIN)
                 } else if (read < 0) {
                     // Mid-session death (route lost, permission revoked, …):
@@ -230,6 +244,85 @@ class AudioCaptureService : Service() {
             }
         }
         Log.i(TAG, "System-audio capture started.")
+    }
+
+    /**
+     * Analyse the actual AudioPlaybackCapture PCM in the service. This is the
+     * source that contains the Android playback mix before it is routed to
+     * Bluetooth, so it continues working after the Activity/GL thread stops.
+     */
+    private fun analysePlaybackAudio(buf: ShortArray, samples: Int) {
+        if (samples <= 0) return
+
+        var peak = 0f
+        var lowAcc = 0f
+        var midAcc = 0f
+        var highAcc = 0f
+        var bassAcc = 0f
+        var trebleAcc = 0f
+
+        val invMax = 1f / 32768f
+        var i = 0
+        while (i + 1 < samples) {
+            // Stereo -> mono. Apply the same digital gain used by the native
+            // playback path so the service-side analysis has sensible levels.
+            val s = (((buf[i].toInt() + buf[i + 1].toInt()) * 0.5f) * invMax) * SYSTEM_AUDIO_GAIN
+            val a = kotlin.math.abs(s)
+            if (a > peak) peak = a
+
+            bassLp += 0.025f * (s - bassLp)
+            midLp += 0.20f * (s - midLp)
+
+            val low = bassLp
+            val mid = midLp - bassLp
+            val high = s - midLp
+            lowAcc += low * low
+            midAcc += mid * mid
+            highAcc += high * high
+            bassAcc += low * low
+            trebleAcc += (s - bassLp) * (s - bassLp)
+
+            if (beatWindowCount < beatWindow.size) {
+                beatWindow[beatWindowCount++] = s
+            }
+            i += CHANNELS
+        }
+
+        val frames = samples / CHANNELS
+        if (frames <= 0) return
+        val inv = 1f / frames
+        val lowRms = sqrt(lowAcc * inv)
+        val midRms = sqrt(midAcc * inv)
+        val highRms = sqrt(highAcc * inv)
+        val bassRms = sqrt(bassAcc * inv)
+        val trebleRms = sqrt(trebleAcc * inv)
+
+        levelFollow = if (peak > levelFollow) peak else levelFollow * 0.985f
+        val rawRatio = if (peak < 0.002f) 0f else
+            bassRms / (bassRms + trebleRms + 1e-6f)
+        bassRatioSmooth += 0.25f * (rawRatio - bassRatioSmooth)
+
+        val base = BeatSettings.levelBase
+        val full = BeatSettings.levelFull
+        val gate = ((levelFollow - base) / (full - base + 1e-6f)).coerceIn(0f, 1f)
+        val loudness = gate * gate * (3f - 2f * gate)
+
+        AudioSyncBus.low = lowRms
+        AudioSyncBus.mid = midRms
+        AudioSyncBus.high = highRms
+        AudioSyncBus.level = levelFollow
+        AudioSyncBus.bassRatio = bassRatioSmooth
+        AudioSyncBus.loudness = loudness
+
+        if (beatWindowCount == beatWindow.size) {
+            if (backgroundBeatDetector.update(beatWindow) && loudness > 0f) {
+                AudioSyncBus.beatCount++
+            }
+            beatWindowCount = 0
+        }
+
+        AudioSyncBus.lastAnalysisNs = System.nanoTime()
+        CaptureHealth.markAudioAnalysis()
     }
 
     /**
@@ -362,6 +455,8 @@ class AudioCaptureService : Service() {
         screenHandler = null
 
         ScreenSyncBus.clear()
+        AudioSyncBus.reset()
+        CaptureHealth.reset()
 
         projection?.stop()
         projection = null

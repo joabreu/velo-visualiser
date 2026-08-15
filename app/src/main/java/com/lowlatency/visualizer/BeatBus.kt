@@ -30,4 +30,7 @@ object BeatBus {
 
     /** Gated discrete beat counter — incremented once per beat that passes the gate. */
     @Volatile var beatCount: Int = 0
+
+    /** Monotonic timestamp of the latest render-thread audio analysis. */
+    @Volatile var lastAnalysisNs: Long = 0L
 }

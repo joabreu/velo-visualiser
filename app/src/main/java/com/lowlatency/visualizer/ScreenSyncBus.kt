@@ -23,6 +23,7 @@ object ScreenSyncBus {
     fun publish(rgb: FloatArray) {
         latest = rgb.copyOf()
         active = true
+        CaptureHealth.markScreen()
     }
 
     fun snapshotInto(out: FloatArray): Boolean {

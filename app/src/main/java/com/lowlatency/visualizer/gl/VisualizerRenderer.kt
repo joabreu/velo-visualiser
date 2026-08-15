@@ -5,6 +5,7 @@ import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.util.Log
 import com.lowlatency.visualizer.BeatBus
+import com.lowlatency.visualizer.CaptureHealth
 import com.lowlatency.visualizer.BeatDetector
 import com.lowlatency.visualizer.BeatPulse
 import com.lowlatency.visualizer.FourFourSync
@@ -405,7 +406,7 @@ class VisualizerRenderer(private val context: Context) : GLSurfaceView.Renderer 
         // a volume-independent bass/treble balance (colour). This is the single
         // gate that decides whether a beat "counts" — for the visuals, the Hue
         // lights and haptics alike — so they all react to the music identically.
-        run {
+        if (pcm.isNotEmpty()) {
             var peak = 0f; var lp = bassLp; var bassAcc = 0f; var trebAcc = 0f
             for (s in pcm) {
                 val a = if (s < 0f) -s else s; if (a > peak) peak = a
@@ -426,6 +427,8 @@ class VisualizerRenderer(private val context: Context) : GLSurfaceView.Renderer 
             val base = BeatSettings.levelBase; val full = BeatSettings.levelFull
             val g = ((levelFollow - base) / (full - base + 1e-6f)).coerceIn(0f, 1f)
             BeatBus.loudness = g * g * (3f - 2f * g)
+            BeatBus.lastAnalysisNs = System.nanoTime()
+            CaptureHealth.markAudioAnalysis()
         }
 
         // Drop/build surge: the big moment the beat grid can't see. We track the
