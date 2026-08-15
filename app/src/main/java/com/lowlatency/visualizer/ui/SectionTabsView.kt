@@ -8,6 +8,7 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.util.AttributeSet
 import android.view.GestureDetector
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import androidx.core.content.ContextCompat
@@ -64,6 +65,11 @@ class SectionTabsView @JvmOverloads constructor(
         },
     )
 
+    init {
+        isFocusable = true
+        isFocusableInTouchMode = true
+    }
+
     fun setItems(labels: List<String>, activeIndex: Int) {
         items = labels
         active = activeIndex.coerceIn(0, max(labels.size - 1, 0))
@@ -77,6 +83,21 @@ class SectionTabsView @JvmOverloads constructor(
         if (p == active) return
         active = p
         animatePillTo(p)
+    }
+
+    /** Select a tab from Android TV / D-pad navigation. */
+    fun selectByKeyboard(delta: Int) {
+        if (items.isEmpty()) return
+
+        var index = active + delta
+
+        while (index in items.indices && index in disabled) {
+            index += delta
+        }
+
+        if (index !in items.indices) return
+
+        select(index)
     }
 
     private fun select(index: Int) {
@@ -98,6 +119,38 @@ class SectionTabsView @JvmOverloads constructor(
     override fun onTouchEvent(e: MotionEvent): Boolean {
         gestures.onTouchEvent(e)
         return true
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (items.isEmpty()) return super.onKeyDown(keyCode, event)
+
+        when (keyCode) {
+            KeyEvent.KEYCODE_DPAD_LEFT -> {
+                var next = active - 1
+                while (next >= 0 && next in disabled) next--
+                if (next >= 0) {
+                    select(next)
+                    return true
+                }
+            }
+
+            KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                var next = active + 1
+                while (next < items.size && next in disabled) next++
+                if (next < items.size) {
+                    select(next)
+                    return true
+                }
+            }
+
+            KeyEvent.KEYCODE_DPAD_CENTER,
+            KeyEvent.KEYCODE_ENTER -> {
+                onSelect?.invoke(active)
+                return true
+            }
+        }
+
+        return super.onKeyDown(keyCode, event)
     }
 
     override fun onDraw(canvas: Canvas) {

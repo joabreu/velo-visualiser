@@ -10,9 +10,12 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.view.View
+import android.view.KeyEvent
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
@@ -27,6 +30,7 @@ import com.lowlatency.visualizer.ui.LightingController
 import com.lowlatency.visualizer.ui.LinkSyncController
 import com.lowlatency.visualizer.ui.LocalPlaybackController
 import com.lowlatency.visualizer.ui.MenuDiscoveryController
+import com.lowlatency.visualizer.ui.SectionTabsView
 import com.lowlatency.visualizer.ui.MenuSheetController
 import com.lowlatency.visualizer.ui.OverlayMetrics
 import com.lowlatency.visualizer.ui.PerfOverlayController
@@ -103,6 +107,276 @@ class MainActivity : AppCompatActivity() {
     // Local playback lives in its own controller; the *source* state lives in
     // AudioSourceController — single source of truth.
     private lateinit var localPlaybackController: LocalPlaybackController
+
+    /**
+     * Android TV remote navigation for the settings sheet.
+     *
+     * Velo's original UI is touch-first, so when the sheet opens there is no
+     * focused child for a D-pad to act on. Route D-pad events through the
+     * Activity and use Android's spatial focus navigation between the existing
+     * controls.
+     */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (!::menuSheetController.isInitialized ||
+            !menuSheetController.isOpen ||
+            event.action != KeyEvent.ACTION_DOWN
+        ) {
+            return super.dispatchKeyEvent(event)
+        }
+
+        when (event.keyCode) {
+            KeyEvent.KEYCODE_DPAD_LEFT -> {
+                if (currentFocus === sectionTabs) {
+                    sectionTabs.selectByKeyboard(-1)
+                    return true
+                }
+                return moveFocus(-1)
+            }
+
+            KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                if (currentFocus === sectionTabs) {
+                    sectionTabs.selectByKeyboard(1)
+                    return true
+                }
+                return moveFocus(1)
+            }
+
+            KeyEvent.KEYCODE_DPAD_UP -> {
+                if (currentFocus === sectionTabs) {
+                    return true
+                }
+
+                val previous = findPreviousFocusable()
+                if (previous != null) {
+                    previous.requestFocus()
+                    scrollToFocus(previous)
+                } else {
+                    sectionTabs.requestFocus()
+                }
+                return true
+            }
+
+            KeyEvent.KEYCODE_DPAD_DOWN -> {
+                if (currentFocus === sectionTabs) {
+                    focusFirstVisibleMenuControl()
+                    return true
+                }
+
+                val next = findNextFocusable()
+                if (next != null) {
+                    next.requestFocus()
+                    scrollToFocus(next)
+                }
+                return true
+            }
+
+            KeyEvent.KEYCODE_DPAD_CENTER,
+            KeyEvent.KEYCODE_ENTER -> {
+                val focused = currentFocus
+
+                if (focused is SectionTabsView) {
+                    focused.performClick()
+                    return true
+                }
+
+                if (focused != null &&
+                    focused.visibility == View.VISIBLE &&
+                    focused.isEnabled &&
+                    focused.isClickable
+                ) {
+                    focused.performClick()
+                    return true
+                }
+            }
+        }
+
+        return super.dispatchKeyEvent(event)
+    }
+
+    private fun getVisibleMenuFocusables(): List<View> {
+        val root = findViewById<View>(R.id.options_sheet_scroll)
+
+        return buildList {
+            collectFocusableViews(root, this)
+        }
+    }
+
+    private fun collectFocusableViews(
+        view: View,
+        result: MutableList<View>
+    ) {
+        if (view.visibility != View.VISIBLE || !view.isShown || !view.isEnabled) return
+
+        if (view !== sectionTabs &&
+            view.isFocusable &&
+            view.isClickable
+        ) {
+            result += view
+        }
+
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) {
+                collectFocusableViews(view.getChildAt(i), result)
+            }
+        }
+    }
+
+    private fun currentMenuFocusIndex(): Int {
+        val focused = currentFocus ?: return -1
+        return getVisibleMenuFocusables().indexOf(focused)
+    }
+
+    private fun findNextFocusable(): View? {
+        val views = getVisibleMenuFocusables()
+        val index = currentMenuFocusIndex()
+
+        return when {
+            index < 0 -> views.firstOrNull()
+            index + 1 < views.size -> views[index + 1]
+            else -> null
+        }
+    }
+
+    private fun findPreviousFocusable(): View? {
+        val views = getVisibleMenuFocusables()
+        val index = currentMenuFocusIndex()
+
+        return when {
+            index > 0 -> views[index - 1]
+            else -> null
+        }
+    }
+
+    private fun moveFocus(direction: Int): Boolean {
+        val views = getVisibleMenuFocusables()
+        if (views.isEmpty()) return true
+
+        val current = currentFocus
+        if (current == null || current === sectionTabs) {
+            views.first().requestFocus()
+            return true
+        }
+
+        val index = views.indexOf(current)
+        if (index < 0) {
+            views.first().requestFocus()
+            return true
+        }
+
+        /*
+        * For LEFT/RIGHT, stay within the current horizontal row when possible.
+        * This is important for controls such as:
+        *
+        *   LOW | STANDARD | HIGH
+        *   DEFAULT | NEON | WARM | COOL | MONO
+        */
+        val currentY = current.getLocationOnScreen(IntArray(2)).let {
+            current.top + current.height / 2
+        }
+
+        val candidates = views
+            .filter { it !== current }
+            .map { view ->
+                val loc = IntArray(2)
+                view.getLocationOnScreen(loc)
+
+                Triple(
+                    view,
+                    loc[0] + view.width / 2,
+                    loc[1] + view.height / 2
+                )
+            }
+
+        val currentLoc = IntArray(2)
+        current.getLocationOnScreen(currentLoc)
+
+        val cx = currentLoc[0] + current.width / 2
+        val cy = currentLoc[1] + current.height / 2
+
+        val rowCandidates = candidates.filter { (_, x, y) ->
+            kotlin.math.abs(y - cy) < current.height
+        }
+
+        val target = if (rowCandidates.isNotEmpty()) {
+            if (direction < 0) {
+                rowCandidates
+                    .filter { (_, x, _) -> x < cx }
+                    .maxByOrNull { (_, x, _) -> x }
+            } else {
+                rowCandidates
+                    .filter { (_, x, _) -> x > cx }
+                    .minByOrNull { (_, x, _) -> x }
+            }
+        } else {
+            null
+        }
+
+        if (target != null) {
+            target.first.requestFocus()
+            scrollToFocus(target.first)
+            return true
+        }
+
+        /*
+        * No neighbour in this row. For LEFT/RIGHT don't jump randomly
+        * into another section.
+        */
+        return true
+    }
+
+    private fun focusFirstVisibleMenuControl() {
+        val first = getVisibleMenuFocusables().firstOrNull()
+
+        if (first != null) {
+            first.requestFocus()
+            scrollToFocus(first)
+        } else {
+            sectionTabs.requestFocus()
+        }
+    }
+
+    private fun scrollToFocus(view: View) {
+        view.post {
+            val scroll = findViewById<ScrollView>(R.id.options_sheet_scroll)
+
+            val location = IntArray(2)
+            view.getLocationOnScreen(location)
+
+            val scrollLocation = IntArray(2)
+            scroll.getLocationOnScreen(scrollLocation)
+
+            val top = location[1] - scrollLocation[1]
+            val bottom = top + view.height
+
+            val padding = 24
+
+            when {
+                top < padding -> {
+                    scroll.smoothScrollBy(0, top - padding)
+                }
+
+                bottom > scroll.height - padding -> {
+                    scroll.smoothScrollBy(
+                        0,
+                        bottom - scroll.height + padding
+                    )
+                }
+            }
+        }
+    }
+
+    private fun findFirstFocusable(view: View): View? {
+        if (view.visibility != View.VISIBLE) return null
+        if (view !== findViewById<View>(R.id.options_sheet_scroll) &&
+            view.isFocusable && view.isEnabled) return view
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) {
+                val found = findFirstFocusable(view.getChildAt(i))
+                if (found != null) return found
+            }
+        }
+        return null
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen()
@@ -520,21 +794,31 @@ class MainActivity : AppCompatActivity() {
     private fun selectTab(tab: Int) {
         currentTab = tab
         sectionTabs.setActive(tab)
+
         for ((view, id) in listOf(
             tabVisualizers to TAB_VISUALS,
             tabLighting to TAB_LIGHTING,
             tabSettings to TAB_SETTINGS,
         )) {
             val active = tab == id
-            if (active && view.visibility != View.VISIBLE) {
+
+            if (active) {
                 view.visibility = View.VISIBLE
-                view.alpha = 0f
-                view.animate().alpha(1f).setDuration(180L).start()
-            } else if (!active) {
+                view.alpha = 1f
+            } else {
                 view.animate().cancel()
                 view.alpha = 1f
                 view.visibility = View.GONE
             }
+        }
+
+        // Put D-pad focus inside the newly selected tab.
+        sectionTabs.post {
+            focusFirstVisibleMenuControl()
+        }
+
+        if (sectionTabs.hasFocus()) {
+            focusFirstVisibleMenuControl()
         }
     }
 

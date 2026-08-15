@@ -114,6 +114,35 @@ class MenuSheetController(
      * sheet's translucent background still spans the full width — only the
      * content centers.
      */
+    /** Put focus on the first visible/focusable control for Android TV. */
+    private fun focusFirstMenuControl() {
+        val tabs = activity.findViewById<SectionTabsView>(R.id.section_tabs)
+
+        if (tabs != null && tabs.visibility == View.VISIBLE && tabs.isEnabled) {
+            tabs.post {
+                tabs.requestFocus()
+            }
+            return
+        }
+
+        optionsSheetScroll.post {
+            val candidate = findFirstFocusable(optionsSheetScroll)
+            candidate?.requestFocus()
+        }
+    }
+
+    private fun findFirstFocusable(view: View): View? {
+        if (view.visibility != View.VISIBLE) return null
+        if (view !== optionsSheetScroll && view.isFocusable && view.isEnabled) return view
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) {
+                val found = findFirstFocusable(view.getChildAt(i))
+                if (found != null) return found
+            }
+        }
+        return null
+    }
+
     private fun applyWidthCapToView(view: View, widthPx: Int, baseGravity: Int) {
         val lp = view.layoutParams as FrameLayout.LayoutParams
         lp.width = widthPx
@@ -219,6 +248,9 @@ class MenuSheetController(
         sheetTravel = sheetTravelPx()
         optionsSheet.translationY = sheetTravel
         optionsSheet.visibility = View.VISIBLE
+        // Android TV has no touch gesture to establish focus. Give the remote
+        // an initial focus target as soon as the sheet opens.
+        optionsSheet.post { focusFirstMenuControl() }
         scrim.alpha = 0f
         scrim.visibility = View.VISIBLE
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {

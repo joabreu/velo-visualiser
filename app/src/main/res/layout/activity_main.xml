@@ -194,7 +194,8 @@
         android:paddingBottom="40dp"
         android:background="@drawable/sheet_background"
         android:clickable="true"
-        android:focusable="true"
+        android:focusable="false"
+        android:focusableInTouchMode="false"
         android:accessibilityPaneTitle="@string/cd_settings_menu">
 
     <!-- TAB 1: Visualizers (Spans full height behind chrome) -->
@@ -273,6 +274,8 @@
 
     <ScrollView
         android:id="@+id/options_sheet_scroll"
+        android:focusable="false"
+        android:focusableInTouchMode="false"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="top"
@@ -320,6 +323,8 @@
 
             <View
                 android:id="@+id/sheet_handle"
+                android:focusable="false"
+                android:focusableInTouchMode="false"
                 android:layout_width="44dp"
                 android:layout_height="4dp"
                 android:layout_gravity="center"
@@ -327,6 +332,8 @@
 
             <Button
                 android:id="@+id/btn_close_menu"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
                 android:layout_width="44dp"
                 android:layout_height="44dp"
                 android:layout_gravity="end|center_vertical"
@@ -368,6 +375,8 @@
 
             <Button
                 android:id="@+id/seg_mic"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
                 android:layout_width="0dp"
                 android:layout_height="48dp"
                 android:layout_weight="1"
@@ -381,6 +390,8 @@
 
             <Button
                 android:id="@+id/seg_internal"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
                 android:layout_width="0dp"
                 android:layout_height="48dp"
                 android:layout_weight="1"
@@ -401,6 +412,8 @@
 
             <Button
                 android:id="@+id/seg_local"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
                 android:layout_width="0dp"
                 android:layout_height="48dp"
                 android:layout_weight="1"
@@ -414,6 +427,8 @@
 
             <Button
                 android:id="@+id/seg_tone"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
                 android:layout_width="0dp"
                 android:layout_height="48dp"
                 android:layout_weight="1"
@@ -429,6 +444,8 @@
         <!-- Mic input picker: shown in mic mode when a wired/USB input exists -->
         <Button
             android:id="@+id/btn_input_device"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:layout_marginBottom="20dp"
@@ -445,6 +462,8 @@
         <!-- Current local track: shown only during a local session; tap to change file -->
         <Button
             android:id="@+id/btn_current_track"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:layout_marginBottom="20dp"
@@ -489,12 +508,16 @@
 
             <Button
                 android:id="@+id/btn_sens_low"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
                 style="@style/SegmentButton"
                 android:layout_marginEnd="4dp"
                 android:text="@string/beat_sens_low" />
 
             <Button
                 android:id="@+id/btn_sens_standard"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
                 style="@style/SegmentButton"
                 android:layout_marginEnd="4dp"
                 android:layout_marginStart="4dp"
@@ -502,6 +525,8 @@
 
             <Button
                 android:id="@+id/btn_sens_high"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
                 style="@style/SegmentButton"
                 android:layout_marginStart="4dp"
                 android:text="@string/beat_sens_high" />
@@ -519,6 +544,8 @@
         <!-- Show Beats on Visuals toggle + explainer -->
         <Button
             android:id="@+id/btn_show_beats"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:layout_marginBottom="8dp"
@@ -542,6 +569,8 @@
         <!-- Vibrate-on-beat haptics toggle -->
         <Button
             android:id="@+id/btn_haptics"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:layout_marginBottom="8dp"
@@ -555,6 +584,8 @@
         <!-- 4/4 Music Mode toggle + explainer -->
         <Button
             android:id="@+id/btn_four_four"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:layout_marginTop="8dp"
@@ -583,6 +614,8 @@
 
         <Button
             android:id="@+id/btn_link_sync"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:layout_marginBottom="8dp"
@@ -614,6 +647,8 @@
 
         <Button
             android:id="@+id/btn_link_notify"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:layout_marginBottom="8dp"
@@ -627,6 +662,8 @@
         <!-- Anticipatory visual swell into each Link beat (visuals only). -->
         <Button
             android:id="@+id/btn_link_anticipate"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:layout_marginBottom="6dp"
@@ -837,6 +874,8 @@
         <!-- Experimental bar-synced glow + drop surge (off by default). -->
         <Button
             android:id="@+id/btn_link_extras"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:layout_marginBottom="6dp"
@@ -859,6 +898,8 @@
         <!-- Manual downbeat alignment for the virtual bar + bar-synced breath. -->
         <Button
             android:id="@+id/btn_link_downbeat"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:layout_marginBottom="6dp"
@@ -912,6 +953,8 @@
 
             <Button
                 android:id="@+id/btn_glow_off"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
                 android:layout_width="0dp"
                 android:layout_height="48dp"
                 android:layout_weight="1"
@@ -925,6 +968,8 @@
 
             <Button
                 android:id="@+id/btn_glow_subtle"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
                 android:layout_width="0dp"
                 android:layout_height="48dp"
                 android:layout_weight="1"
@@ -939,6 +984,8 @@
 
             <Button
                 android:id="@+id/btn_glow_standard"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
                 android:layout_width="0dp"
                 android:layout_height="48dp"
                 android:layout_weight="1"
@@ -983,12 +1030,16 @@
 
             <Button
                 android:id="@+id/btn_theme_default"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
                 style="@style/SegmentButton"
                 android:layout_marginEnd="4dp"
                 android:text="@string/theme_default" />
 
             <Button
                 android:id="@+id/btn_theme_neon"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
                 style="@style/SegmentButton"
                 android:layout_marginStart="4dp"
                 android:layout_marginEnd="4dp"
@@ -996,6 +1047,8 @@
 
             <Button
                 android:id="@+id/btn_theme_warm"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
                 style="@style/SegmentButton"
                 android:layout_marginStart="4dp"
                 android:layout_marginEnd="4dp"
@@ -1003,6 +1056,8 @@
 
             <Button
                 android:id="@+id/btn_theme_cool"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
                 style="@style/SegmentButton"
                 android:layout_marginStart="4dp"
                 android:layout_marginEnd="4dp"
@@ -1010,6 +1065,8 @@
 
             <Button
                 android:id="@+id/btn_theme_mono"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
                 style="@style/SegmentButton"
                 android:layout_marginStart="4dp"
                 android:text="@string/theme_mono" />
@@ -1024,6 +1081,8 @@
         <!-- Cast to external display (visible only when display is connected) -->
         <Button
             android:id="@+id/btn_cast_display"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:layout_marginBottom="8dp"
@@ -1038,6 +1097,8 @@
         <!-- OLED burn-in protection toggle -->
         <Button
             android:id="@+id/btn_burnin"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:layout_marginBottom="8dp"
@@ -1049,10 +1110,17 @@
             android:stateListAnimator="@null" />
 
         <!-- Ambient Mode: a standby viewing mode, with its Classic/Window sub-option. -->
-        <Button android:id="@+id/btn_display_mode" style="@style/VisualizerPill" android:text="@string/ambient_mode" />
+        <Button
+            android:id="@+id/btn_display_mode"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            style="@style/VisualizerPill"
+            android:text="@string/ambient_mode" />
 
         <Button
             android:id="@+id/btn_ambient_style"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:layout_marginBottom="8dp"
@@ -1072,6 +1140,8 @@
 
             <Button
                 android:id="@+id/btn_peak_luminance"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
                 android:layout_width="match_parent"
                 android:layout_height="48dp"
                 android:layout_marginBottom="8dp"
@@ -1103,6 +1173,8 @@
         <!-- Toggle the visualiser-name label that flashes over the canvas on swipe -->
         <Button
             android:id="@+id/btn_scene_label"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:layout_marginBottom="8dp"
@@ -1116,6 +1188,8 @@
         <!-- Auto-advance through scenes on a timer (respects favourites). -->
         <Button
             android:id="@+id/btn_shuffle"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:layout_marginBottom="8dp"
@@ -1129,6 +1203,8 @@
         <!-- Performance diagnostics overlay toggle -->
         <Button
             android:id="@+id/btn_perf_overlay"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:layout_marginBottom="8dp"
@@ -1147,6 +1223,8 @@
 
         <Button
             android:id="@+id/btn_privacy_policy"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:layout_marginBottom="8dp"
@@ -1159,6 +1237,8 @@
 
         <Button
             android:id="@+id/btn_about"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:layout_marginBottom="8dp"
@@ -1171,6 +1251,8 @@
 
         <Button
             android:id="@+id/btn_feedback"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:layout_marginBottom="20dp"
@@ -1213,6 +1295,8 @@
 
             <Button
                 android:id="@+id/btn_brand_hue"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
                 android:layout_width="0dp"
                 android:layout_height="48dp"
                 android:layout_weight="1"
@@ -1226,6 +1310,8 @@
 
             <Button
                 android:id="@+id/btn_brand_lifx"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
                 android:layout_width="0dp"
                 android:layout_height="48dp"
                 android:layout_weight="1"
@@ -1240,6 +1326,8 @@
 
             <Button
                 android:id="@+id/btn_brand_nanoleaf"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
                 android:layout_width="0dp"
                 android:layout_height="48dp"
                 android:layout_weight="1"
@@ -1256,6 +1344,8 @@
                  removing visibility="gone" (the panel is fully wired). -->
             <Button
                 android:id="@+id/btn_brand_wled"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
                 android:layout_width="0dp"
                 android:layout_height="48dp"
                 android:layout_weight="1"
@@ -1305,6 +1395,8 @@
 
                 <Button
                     android:id="@+id/btn_react_smooth"
+                    android:focusable="true"
+                    android:focusableInTouchMode="true"
                     android:layout_width="0dp"
                     android:layout_height="48dp"
                     android:layout_weight="1"
@@ -1318,6 +1410,8 @@
 
                 <Button
                     android:id="@+id/btn_react_reactive"
+                    android:focusable="true"
+                    android:focusableInTouchMode="true"
                     android:layout_width="0dp"
                     android:layout_height="48dp"
                     android:layout_weight="1"
@@ -1332,6 +1426,8 @@
 
                 <Button
                     android:id="@+id/btn_react_strobe"
+                    android:focusable="true"
+                    android:focusableInTouchMode="true"
                     android:layout_width="0dp"
                     android:layout_height="48dp"
                     android:layout_weight="1"
@@ -1381,15 +1477,22 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
+        android:focusable="false"
         android:orientation="vertical">
 
         <!-- ───── divider: Content / Bottom Nav ───── -->
-        <View android:id="@+id/sheet_nav_divider" style="@style/Divider" />
+        <View
+            android:id="@+id/sheet_nav_divider"
+            android:focusable="false"
+            android:focusableInTouchMode="false"
+            style="@style/Divider" />
 
         <!-- Section selector pinned at the bottom for one-handed reach.
              Tap a tab to switch sections. -->
         <com.lowlatency.visualizer.ui.SectionTabsView
             android:id="@+id/section_tabs"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:layout_width="match_parent"
             android:layout_height="52dp"
             android:layout_marginBottom="@dimen/bottom_nav_margin_bottom"
@@ -1660,6 +1763,8 @@
 
             <SeekBar
                 android:id="@+id/media_seek"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
                 android:layout_width="0dp"
                 android:layout_height="@dimen/media_bar_button"
                 android:layout_weight="1"
@@ -1753,6 +1858,8 @@
 
         <SeekBar
             android:id="@+id/tone_freq_seek"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:max="1000"
@@ -1774,6 +1881,8 @@
 
         <SeekBar
             android:id="@+id/tone_freq_right_seek"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:max="1000"
@@ -1786,6 +1895,8 @@
 
         <TextView
             android:id="@+id/tone_level_label"
+            android:focusable="false"
+            android:focusableInTouchMode="false"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:textColor="@color/text_dim"
@@ -1794,6 +1905,8 @@
 
         <SeekBar
             android:id="@+id/tone_level_seek"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:max="1000"
@@ -1805,6 +1918,8 @@
 
         <Button
             android:id="@+id/tone_xy_toggle"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:background="@drawable/segment_button_bg"
