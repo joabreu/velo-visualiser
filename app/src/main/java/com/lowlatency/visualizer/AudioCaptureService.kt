@@ -12,14 +12,21 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
+import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.graphics.PixelFormat
+import android.hardware.display.DisplayManager
+import android.hardware.display.VirtualDisplay
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Process
 import android.util.Log
 import androidx.annotation.RequiresPermission
 import androidx.core.content.IntentCompat
 import kotlin.concurrent.thread
+import kotlin.math.max
 
 /**
  * Foreground service that owns a MediaProjection session and captures *system
@@ -81,6 +88,12 @@ class AudioCaptureService : Service() {
     private var projection: MediaProjection? = null
     private var record: AudioRecord? = null
     private var readerThread: Thread? = null
+
+    private var screenReader: ImageReader? = null
+    private var screenDisplay: VirtualDisplay? = null
+    private var screenThread: HandlerThread? = null
+    private var screenHandler: Handler? = null
+    private val screenAnalyzer = ScreenColorAnalyzer()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -170,6 +183,10 @@ class AudioCaptureService : Service() {
         }, null)
         projection = mp
 
+        // Reuse the same MediaProjection grant for video. No second user
+        // permission dialog is required.
+        startScreenCapture(mp)
+
         val minBuf = AudioRecord.getMinBufferSize(
             SAMPLE_RATE,
             AudioFormat.CHANNEL_IN_STEREO,
@@ -213,6 +230,59 @@ class AudioCaptureService : Service() {
             }
         }
         Log.i(TAG, "System-audio capture started.")
+    }
+
+    /**
+     * Reuses the MediaProjection already granted for system audio to capture
+     * the display into a small RGBA frame for perimeter colour extraction.
+     */
+    private fun startScreenCapture(mp: MediaProjection) {
+        val metrics = resources.displayMetrics
+        val sourceWidth = metrics.widthPixels.coerceAtLeast(320)
+        val sourceHeight = metrics.heightPixels.coerceAtLeast(180)
+
+        val width = minOf(sourceWidth, 960)
+        val height = max(
+            180,
+            (width.toFloat() * sourceHeight / sourceWidth).toInt()
+        )
+
+        screenThread = HandlerThread("VeloScreenCapture").also { it.start() }
+        screenHandler = Handler(screenThread!!.looper)
+
+        val reader = ImageReader.newInstance(
+            width,
+            height,
+            PixelFormat.RGBA_8888,
+            2
+        )
+        screenReader = reader
+
+        reader.setOnImageAvailableListener({ imageReader ->
+            val image = imageReader.acquireLatestImage()
+                ?: return@setOnImageAvailableListener
+
+            try {
+                ScreenSyncBus.publish(screenAnalyzer.analyse(image))
+            } catch (t: Throwable) {
+                Log.w(TAG, "Screen colour analysis failed", t)
+            } finally {
+                image.close()
+            }
+        }, screenHandler)
+
+        screenDisplay = mp.createVirtualDisplay(
+            "VeloScreenSync",
+            width,
+            height,
+            metrics.densityDpi,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+            reader.surface,
+            null,
+            screenHandler
+        )
+
+        Log.i(TAG, "Screen capture started: ${width}x${height}")
     }
 
     /**
@@ -273,6 +343,22 @@ class AudioCaptureService : Service() {
         readerThread = null
         record?.runCatching { release() }
         record = null
+
+        screenReader?.setOnImageAvailableListener(null, null)
+        screenDisplay?.runCatching { release() }
+        screenDisplay = null
+        screenReader?.runCatching { close() }
+        screenReader = null
+
+        screenThread?.runCatching {
+            quitSafely()
+            join(300)
+        }
+        screenThread = null
+        screenHandler = null
+
+        ScreenSyncBus.clear()
+
         projection?.stop()
         projection = null
         sendBroadcast(

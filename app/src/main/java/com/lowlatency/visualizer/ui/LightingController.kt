@@ -223,15 +223,12 @@ class LightingController(
             PerfOverlayController.HueStats(false, 0L, 0L, -1L)
         }
 
-    /** Switching to system (internal) audio: light sync is mic-only, so stop it. */
+    /**
+     * Switching to system audio: Hue remains active because it can use the
+     * MediaProjection screen frame as its spatial colour source. The other
+     * lighting backends remain mic-only and are stopped as before.
+     */
     fun onSystemAudioEngaged() {
-        if (::hueController.isInitialized && hueController.isEnabled) {
-            hueController.disable(turnOff = true)
-            updateHueSyncButton(false)
-            updateHueConn(HueConn.REACHABLE)
-            hueStatus.setText(R.string.hue_status_ready)
-            updateHueSections()
-        }
         if (lifxSyncing) {
             lifxController.disableStreaming()
             lifxSyncing = false

@@ -8,6 +8,7 @@ import com.lowlatency.visualizer.BeatBus
 import com.lowlatency.visualizer.LightingSettings
 import com.lowlatency.visualizer.LinkSync
 import com.lowlatency.visualizer.NativeBridge
+import com.lowlatency.visualizer.ScreenSyncBus
 import kotlin.concurrent.thread
 import kotlin.math.abs
 
@@ -31,6 +32,7 @@ class HueLightController(context: Context) {
     @Volatile private var low = 0f
     @Volatile private var mid = 0f
     @Volatile private var high = 0f
+    private val screenRgb = FloatArray(ScreenSyncBus.COMPONENTS)
 
     @Volatile private var running = false
     @Volatile var paused = false        // true while app is backgrounded; sender drops to 1 Hz keepalive
@@ -245,7 +247,21 @@ class HueLightController(context: Context) {
                     val bc = BeatBus.beatCount
                     if (bc != lastBeat) { flash = BeatBus.loudness; lastBeat = bc; lightBeatCount++ }
                     flash *= FLASH_DECAY
-                    mapColors(channelIds.size, l, m, h, flash, rgb)
+                    if (ScreenSyncBus.active &&
+                        ScreenSyncBus.snapshotInto(screenRgb)
+                    ) {
+                        mapScreenColors(
+                            channelIds.size,
+                            screenRgb,
+                            l,
+                            m,
+                            h,
+                            flash,
+                            rgb
+                        )
+                    } else {
+                        mapColors(channelIds.size, l, m, h, flash, rgb)
+                    }
                 }
 
                 c.send(channelIds, rgb)
@@ -259,6 +275,41 @@ class HueLightController(context: Context) {
                 // Spin-wait the final margin for precise timing
                 while (System.nanoTime() < deadlineNs) Thread.yield()
             }
+        }
+    }
+
+    /**
+     * Screen colour supplies the spatial component while the existing audio
+     * brightness/beat processing supplies the temporal component.
+     */
+    private fun mapScreenColors(
+        count: Int,
+        screen: FloatArray,
+        low: Float,
+        mid: Float,
+        high: Float,
+        flash: Float,
+        out: FloatArray,
+    ) {
+        if (count <= 0) return
+
+        val value = LightingSettings.audioBrightnessValue(low, mid, high, flash)
+
+        for (i in 0 until count) {
+            val zone = if (count == 1) {
+                1
+            } else {
+                ((i.toFloat() / count) * ScreenSyncBus.ZONES)
+                    .toInt()
+                    .coerceIn(0, ScreenSyncBus.ZONES - 1)
+            }
+
+            val src = zone * 3
+            val dst = i * 3
+
+            out[dst] = (screen[src] * value).coerceIn(0f, 1f)
+            out[dst + 1] = (screen[src + 1] * value).coerceIn(0f, 1f)
+            out[dst + 2] = (screen[src + 2] * value).coerceIn(0f, 1f)
         }
     }
 

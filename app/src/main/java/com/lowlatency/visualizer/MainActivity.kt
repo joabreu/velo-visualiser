@@ -1076,18 +1076,8 @@ class MainActivity : AppCompatActivity() {
      * beat sensitivity. Light sync + haptics are mic-only.
      */
     private fun onAudioSourceChanged() {
-        val systemAudio = audioSourceController.systemAudioMode
-        sectionTabs.disabled = if (systemAudio) setOf(TAB_LIGHTING) else emptySet()
-        
         glView.onAudioSourceChanged()
         scenesController.onAudioSourceChanged()
-
-        if (systemAudio) {
-            if (::lightingController.isInitialized) lightingController.onSystemAudioEngaged()
-            if (currentTab == TAB_LIGHTING) {
-                selectTab(TAB_VISUALS)
-            }
-        }
         updateStatus()
     }
 
