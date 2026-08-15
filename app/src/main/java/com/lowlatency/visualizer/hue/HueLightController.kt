@@ -174,10 +174,25 @@ class HueLightController(context: Context) {
                 val t0 = System.nanoTime()
 
                 if (paused) {
-                    // App is backgrounded — send a silent frame at 1 Hz to keep DTLS alive.
-                    for (i in rgb.indices) rgb[i] = 0f
+                    // If the Activity is backgrounded, keep the Hue stream alive
+                    // with the latest screen colours. Never send a black frame:
+                    // the video player remains on the display and ScreenSyncBus
+                    // continues to receive MediaProjection frames.
+                    if (ScreenSyncBus.active &&
+                        ScreenSyncBus.snapshotInto(screenRgb)
+                    ) {
+                        mapScreenColors(
+                            channelIds.size,
+                            screenRgb,
+                            low = 0f,
+                            mid = 0f,
+                            high = 0f,
+                            flash = 0f,
+                            out = rgb
+                        )
+                    }
                     c.send(channelIds, rgb)
-                    try { Thread.sleep(1000) } catch (_: InterruptedException) { break }
+                    try { Thread.sleep(20) } catch (_: InterruptedException) { break }
                     continue
                 }
 
