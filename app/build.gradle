@@ -28,7 +28,7 @@ android {
         // --- NDK / native build ---
         ndk {
             //noinspection ChromeOsAbiSupport: We use ARM instructions and do not support X86.
-            abiFilters "arm64-v8a"
+	    abiFilters "armeabi-v7a", "arm64-v8a"
         }
 
         externalNativeBuild {
