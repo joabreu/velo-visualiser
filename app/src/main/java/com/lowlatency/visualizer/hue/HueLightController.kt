@@ -44,8 +44,7 @@ class HueLightController(context: Context) {
     private var smoothMid = 0f
     private var smoothHigh = 0f
 
-    // Per-light colour state. Hue changes are deliberately slow so the room follows
-    // the musical envelope instead of flickering at the 50 Hz stream rate.
+    // Each Hue channel keeps its own slowly changing RGB state.
     private var smoothedRgb = FloatArray(0)
 
     @Volatile private var running = false
@@ -155,6 +154,7 @@ class HueLightController(context: Context) {
     ) {
         val channelIds = IntArray(area.channels.size) { area.channels[it].channelId }
         val rgb = FloatArray(channelIds.size * 3)
+        smoothedRgb = FloatArray(channelIds.size * 3)
 
         senderThread = thread(name = "hue-sender", priority = Thread.NORM_PRIORITY + 1) {
             val c = HueStreamClient(
@@ -319,7 +319,7 @@ class HueLightController(context: Context) {
                     if (bc != lastBeat) {
                         // Beat controls a slower, visible colour/brightness pulse.
                         // Keep the strongest pulse when beats arrive close together.
-                        flash = maxOf(flash, audioLoudness)
+                        flash = maxOf(flash, (audioLoudness * 0.18f).coerceIn(0f, 0.18f))
                         lastBeat = bc
                         lightBeatCount++
                     }
@@ -356,14 +356,8 @@ class HueLightController(context: Context) {
     }
 
     /**
-     * Combine the spatial colour of each captured screen zone with the musical
-     * spectrum. The screen supplies the base hue independently for each light;
-     * the dominant frequency rotates that hue, so different screen regions stay
-     * visibly different instead of collapsing to one global audio colour.
-     *
-     * Beat controls brightness and adds a small warm hue punch. Both colour and
-     * brightness are smoothed so the lights follow the musical envelope rather
-     * than individual 20 ms audio blocks.
+     * Screen colour supplies the spatial component while the existing audio
+     * brightness/beat processing supplies the temporal component.
      */
     private fun mapScreenColors(
         count: Int,
@@ -375,115 +369,87 @@ class HueLightController(context: Context) {
         out: FloatArray,
     ) {
         if (count <= 0) return
-        ensureSmoothBuffer(count)
+        if (smoothedRgb.size != count * 3) smoothedRgb = FloatArray(count * 3)
 
         val low2 = low * low
         val mid2 = mid * mid
         val high2 = high * high
         val total = low2 + mid2 + high2 + 1e-4f
-        val lowShare = low2 / total
-        val midShare = mid2 / total
-        val highShare = high2 / total
-
-        // Frequency-dependent hue rotation:
-        // bass = warm, mids = neutral/magenta, treble = cool.
-        val frequencyShift = (-55f * lowShare) + (0f * midShare) + (55f * highShare)
-        val pulse = flash.coerceIn(0f, 1f)
-        val beatShift = -22f * pulse
-        val beatBrightness = 1f + 0.30f * pulse
+        val audioPos = ((mid2 * 0.35f + high2) / total).coerceIn(0f, 1f)
+        val audioHue = AUDIO_HUE_BASS + (AUDIO_HUE_TREBLE - AUDIO_HUE_BASS) * audioPos
+        val value = LightingSettings.audioBrightnessValue(low, mid, high, flash)
+        val pulse = flash.coerceIn(0f, 0.18f)
 
         for (i in 0 until count) {
-            val zone = if (count == 1) {
-                1
-            } else {
-                ((i.toFloat() / count) * ScreenSyncBus.ZONES)
-                    .toInt()
-                    .coerceIn(0, ScreenSyncBus.ZONES - 1)
-            }
+            val zone = if (count == 1) ScreenSyncBus.ZONES / 2 else
+                ((i.toFloat() / count) * ScreenSyncBus.ZONES).toInt().coerceIn(0, ScreenSyncBus.ZONES - 1)
             val src = zone * 3
             val dst = i * 3
-
             rgbToHsv(screen[src], screen[src + 1], screen[src + 2])
-            var hue = hsvIn[0] + frequencyShift + beatShift
-            // Preserve some spatial separation even when the screen itself is nearly uniform.
-            hue += if (count > 1) {
-                (i.toFloat() / (count - 1) - 0.5f) * 36f
-            } else 0f
-
-            val saturation = (hsvIn[1] * 0.85f + 0.15f).coerceIn(0.25f, 1f)
-            val value = (hsvIn[2] * beatBrightness).coerceIn(0.08f, 1f)
-            hsvToRgb(hue, saturation, value)
-            smoothInto(dst, hsvOut[0], hsvOut[1], hsvOut[2], out)
+            val screenHue = hsvIn[0]
+            val hueDelta = shortestHueDelta(screenHue, audioHue)
+            val targetHue = normalizeHue(screenHue + hueDelta * 0.35f)
+            val targetSat = (hsvIn[1] * 0.70f + AUDIO_SAT * 0.30f).coerceIn(0.35f, 1f)
+            val targetValue = (hsvIn[2] * 0.45f + value * 0.55f).coerceIn(0.08f, 1f)
+            hsvToRgb(targetHue, targetSat, targetValue)
+            val beatBoost = 1f + pulse
+            val tr = (hsvOut[0] * beatBoost).coerceIn(0f, 1f)
+            val tg = (hsvOut[1] * beatBoost).coerceIn(0f, 1f)
+            val tb = (hsvOut[2] * beatBoost).coerceIn(0f, 1f)
+            smoothedRgb[dst] += COLOR_SMOOTH * (tr - smoothedRgb[dst])
+            smoothedRgb[dst + 1] += COLOR_SMOOTH * (tg - smoothedRgb[dst + 1])
+            smoothedRgb[dst + 2] += COLOR_SMOOTH * (tb - smoothedRgb[dst + 2])
+            out[dst] = smoothedRgb[dst]
+            out[dst + 1] = smoothedRgb[dst + 1]
+            out[dst + 2] = smoothedRgb[dst + 2]
         }
     }
 
-    /** Audio-only fallback. Frequency selects a broad hue range; lights retain
-     * a modest spatial offset and all colour transitions are low-pass filtered. */
     private fun mapColors(count: Int, low: Float, mid: Float, high: Float, flash: Float, out: FloatArray) {
         if (count <= 0) return
-        ensureSmoothBuffer(count)
-
-        val low2 = low * low
-        val mid2 = mid * mid
-        val high2 = high * high
-        val total = low2 + mid2 + high2 + 1e-4f
-        val spectralPosition = ((mid2 * 0.5f + high2) / total).coerceIn(0f, 1f)
+        if (smoothedRgb.size != count * 3) smoothedRgb = FloatArray(count * 3)
+        val total = low + mid + high + 1e-3f
+        val centroid = ((mid * 0.35f + high) / total).coerceIn(0f, 1f)
         val value = LightingSettings.audioBrightnessValue(low, mid, high, flash)
-        val sat = AUDIO_SAT
-        val pulse = flash.coerceIn(0f, 1f)
-        val beatShift = -22f * pulse
-
+        val pulse = flash.coerceIn(0f, 0.18f)
         for (i in 0 until count) {
-            val spread = if (count > 1) {
-                (i.toFloat() / (count - 1) - 0.5f) * 70f
-            } else 0f
-            val hue = AUDIO_HUE_BASS +
-                (AUDIO_HUE_TREBLE - AUDIO_HUE_BASS) * spectralPosition +
-                spread + beatShift
-            hsvToRgb(hue, sat, value)
-            smoothInto(i * 3, hsvOut[0], hsvOut[1], hsvOut[2], out)
+            val spread = if (count > 1) (i.toFloat() / (count - 1) - 0.5f) * 110f else 0f
+            val hue = AUDIO_HUE_BASS + (AUDIO_HUE_TREBLE - AUDIO_HUE_BASS) * centroid + spread
+            hsvToRgb(hue, AUDIO_SAT, value * (1f + pulse))
+            val dst = i * 3
+            smoothedRgb[dst] += COLOR_SMOOTH * (hsvOut[0].coerceIn(0f, 1f) - smoothedRgb[dst])
+            smoothedRgb[dst + 1] += COLOR_SMOOTH * (hsvOut[1].coerceIn(0f, 1f) - smoothedRgb[dst + 1])
+            smoothedRgb[dst + 2] += COLOR_SMOOTH * (hsvOut[2].coerceIn(0f, 1f) - smoothedRgb[dst + 2])
+            out[dst] = smoothedRgb[dst]
+            out[dst + 1] = smoothedRgb[dst + 1]
+            out[dst + 2] = smoothedRgb[dst + 2]
         }
-    }
-
-    private fun ensureSmoothBuffer(count: Int) {
-        val required = count * 3
-        if (smoothedRgb.size != required) smoothedRgb = FloatArray(required)
-    }
-
-    private fun smoothInto(dst: Int, r: Float, g: Float, b: Float, out: FloatArray) {
-        // ~0.8 s time constant at 50 Hz. This is intentionally much slower than
-        // the audio blocks so colour changes feel like ambient lighting.
-        val a = COLOR_SMOOTH
-        smoothedRgb[dst] += a * (r - smoothedRgb[dst])
-        smoothedRgb[dst + 1] += a * (g - smoothedRgb[dst + 1])
-        smoothedRgb[dst + 2] += a * (b - smoothedRgb[dst + 2])
-        out[dst] = smoothedRgb[dst]
-        out[dst + 1] = smoothedRgb[dst + 1]
-        out[dst + 2] = smoothedRgb[dst + 2]
     }
 
     // Reused HSV->RGB scratch (written on the sender thread only). h in degrees,
     // s/v in 0..1. Result lands in [hsvOut].
     private val hsvOut = FloatArray(3)
     private val hsvIn = FloatArray(3)
+
     private fun rgbToHsv(r: Float, g: Float, b: Float) {
-        val max = maxOf(r, g, b)
-        val min = minOf(r, g, b)
-        val d = max - min
+        val max = maxOf(r, g, b); val min = minOf(r, g, b); val d = max - min
         var h = 0f
         if (d > 1e-5f) {
             h = when (max) {
                 r -> 60f * (((g - b) / d) % 6f)
                 g -> 60f * (((b - r) / d) + 2f)
                 else -> 60f * (((r - g) / d) + 4f)
-            }
-            if (h < 0f) h += 360f
+            }; if (h < 0f) h += 360f
         }
-        hsvIn[0] = h
-        hsvIn[1] = if (max <= 1e-5f) 0f else d / max
-        hsvIn[2] = max
+        hsvIn[0] = h; hsvIn[1] = if (max <= 1e-5f) 0f else d / max; hsvIn[2] = max
     }
-
+    private fun normalizeHue(h: Float): Float = ((h % 360f) + 360f) % 360f
+    private fun shortestHueDelta(from: Float, to: Float): Float {
+        var d = normalizeHue(to) - normalizeHue(from)
+        if (d > 180f) d -= 360f
+        if (d < -180f) d += 360f
+        return d
+    }
     private fun hsvToRgb(h: Float, s: Float, v: Float) {
         val hh = (((h % 360f) + 360f) % 360f) / 60f
         val c = v * s
@@ -505,8 +471,7 @@ class HueLightController(context: Context) {
         private const val TAG = "HueLightController"
         private const val SEND_HZ = 50L          // Hue Entertainment caps ~50–60 Hz
         private const val SPIN_MARGIN_NS = 2_000_000L  // spin-wait the last 2ms for precise timing
-        private const val FLASH_DECAY = 0.975f     // per-frame flash falloff (~50 Hz)
-        private const val COLOR_SMOOTH = 0.025f    // slow ~0.8 s ambient colour transition
+        private const val FLASH_DECAY = 0.995f
 
         // Brightness floor, beat-flash amplitude and the resting glow are now shared
         // across all brands in LightingSettings (so presets behave identically).
@@ -525,5 +490,6 @@ class HueLightController(context: Context) {
         private const val AUDIO_HUE_TREBLE = 220f   // treble-heavy => blue
         private const val AUDIO_SAT = 0.92f         // vivid resting saturation
         private const val AUDIO_CHANNEL_SPREAD = 0.22f  // hue fan across multiple lights
+        private const val COLOR_SMOOTH = 0.015f     // slow colour transition at 50 Hz
     }
 }
