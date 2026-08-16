@@ -20,6 +20,10 @@ class ScreenColorAnalyzer {
     private val red = LongArray(ZONES)
     private val green = LongArray(ZONES)
     private val blue = LongArray(ZONES)
+    private val vividRed = FloatArray(ZONES)
+    private val vividGreen = FloatArray(ZONES)
+    private val vividBlue = FloatArray(ZONES)
+    private val weight = FloatArray(ZONES)
     private val count = IntArray(ZONES)
 
     fun analyse(image: Image): FloatArray {
@@ -27,6 +31,10 @@ class ScreenColorAnalyzer {
         red.fill(0L)
         green.fill(0L)
         blue.fill(0L)
+        vividRed.fill(0f)
+        vividGreen.fill(0f)
+        vividBlue.fill(0f)
+        weight.fill(0f)
         count.fill(0)
 
         if (image.planes.isEmpty()) return output
@@ -55,21 +63,57 @@ class ScreenColorAnalyzer {
                 val row = (sy * ScreenSyncBus.ROWS) / Y_SAMPLES
                 val zone = row * ScreenSyncBus.COLUMNS + col
 
-                red[zone] += buffer.get(offset).toInt() and 0xff
-                green[zone] += buffer.get(offset + 1).toInt() and 0xff
-                blue[zone] += buffer.get(offset + 2).toInt() and 0xff
+                val r = buffer.get(offset).toInt() and 0xff
+                val g = buffer.get(offset + 1).toInt() and 0xff
+                val b = buffer.get(offset + 2).toInt() and 0xff
+
+                red[zone] += r.toLong()
+                green[zone] += g.toLong()
+                blue[zone] += b.toLong()
                 count[zone]++
+
+                // A plain RGB average washes saturated video colours out when a
+                // zone also contains black/white UI. Give chromatic pixels more
+                // influence while retaining a neutral baseline for white/grey.
+                val maxChannel = maxOf(r, g, b)
+                val minChannel = minOf(r, g, b)
+                val chroma = (maxChannel - minChannel) / 255f
+                val chroma2 = chroma * chroma
+                val sampleWeight = 1f + 5f * chroma2
+
+                vividRed[zone] += r * sampleWeight
+                vividGreen[zone] += g * sampleWeight
+                vividBlue[zone] += b * sampleWeight
+                weight[zone] += sampleWeight
             }
         }
 
         for (zone in 0 until ZONES) {
             val n = count[zone]
             if (n == 0) continue
-            val scale = 1f / (n * 255f)
+
+            val normalScale = 1f / (n * 255f)
+            val vividScale = 1f / (weight[zone] * 255f)
+
+            val normalR = red[zone] * normalScale
+            val normalG = green[zone] * normalScale
+            val normalB = blue[zone] * normalScale
+
+            val vividR = vividRed[zone] * vividScale
+            val vividG = vividGreen[zone] * vividScale
+            val vividB = vividBlue[zone] * vividScale
+
+            // Keep genuinely neutral zones neutral. As chroma increases,
+            // progressively favour the chroma-weighted colour.
+            val avgMax = maxOf(normalR, normalG, normalB)
+            val avgMin = minOf(normalR, normalG, normalB)
+            val avgChroma = (avgMax - avgMin).coerceIn(0f, 1f)
+            val vividMix = (avgChroma * 2.5f).coerceIn(0f, 0.82f)
+
             val p = zone * 3
-            output[p] = red[zone] * scale
-            output[p + 1] = green[zone] * scale
-            output[p + 2] = blue[zone] * scale
+            output[p] = (normalR * (1f - vividMix) + vividR * vividMix).coerceIn(0f, 1f)
+            output[p + 1] = (normalG * (1f - vividMix) + vividG * vividMix).coerceIn(0f, 1f)
+            output[p + 2] = (normalB * (1f - vividMix) + vividB * vividMix).coerceIn(0f, 1f)
         }
 
         return output

@@ -397,11 +397,12 @@ class AudioCaptureService : Service() {
         val sourceWidth = metrics.widthPixels.coerceAtLeast(320)
         val sourceHeight = metrics.heightPixels.coerceAtLeast(180)
 
-        val width = minOf(sourceWidth, 1280)
-        val height = max(
-            180,
-            (width.toFloat() * sourceHeight / sourceWidth).toInt()
-        )
+        // Capture the complete physical display at its native dimensions.
+        // Do not downscale the VirtualDisplay: on Android TV the logical
+        // metrics may otherwise result in only part of the framebuffer being
+        // mirrored into the ImageReader.
+        val width = sourceWidth
+        val height = sourceHeight
 
         screenThread = HandlerThread("VeloScreenCapture").also { it.start() }
         screenHandler = Handler(screenThread!!.looper)
@@ -410,7 +411,7 @@ class AudioCaptureService : Service() {
             width,
             height,
             PixelFormat.RGBA_8888,
-            2
+            3
         )
         screenReader = reader
 
@@ -419,6 +420,15 @@ class AudioCaptureService : Service() {
                 ?: return@setOnImageAvailableListener
 
             try {
+                val crop = image.cropRect
+                if (crop.width() != image.width || crop.height() != image.height) {
+                    Log.w(
+                        TAG,
+                        "MediaProjection delivered cropped frame: " +
+                            "image=${image.width}x${image.height} " +
+                            "crop=${crop.left},${crop.top}-${crop.right},${crop.bottom}"
+                    )
+                }
                 ScreenSyncBus.publish(screenAnalyzer.analyse(image))
             } catch (t: Throwable) {
                 Log.w(TAG, "Screen colour analysis failed", t)
@@ -438,7 +448,11 @@ class AudioCaptureService : Service() {
             screenHandler
         )
 
-        Log.i(TAG, "Screen capture started: physical=${sourceWidth}x${sourceHeight} capture=${width}x${height}")
+        Log.i(
+            TAG,
+            "Screen capture started: real=${sourceWidth}x${sourceHeight} " +
+                "virtual=${width}x${height} densityDpi=${metrics.densityDpi}"
+        )
     }
 
     /**

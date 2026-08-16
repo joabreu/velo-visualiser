@@ -412,34 +412,47 @@ class HueLightController(context: Context) {
             val screenSat = hsvIn[1]
             val screenValue = hsvIn[2]
 
-            // Strong musical changes pull the screen colour further toward the
-            // spectral colour. A small per-zone phase keeps simultaneous lights
-            // from collapsing onto one tone even when the soundtrack is uniform.
-            val phase = ZONE_HUE_PHASES[zone % ZONE_HUE_PHASES.size]
+            // The video remains the visual identity. Audio is a deliberately
+            // small modulation layer: it can make a saturated colour move and
+            // become more vivid, but it cannot rotate the screen colour into a
+            // different family (for example green -> purple).
+            // Neutral pixels have no meaningful hue, so audio must not colour them.
+            val chroma = screenSat.coerceIn(0f, 1f)
             val delta = shortestHueDelta(screenHue, audioHue)
-            val fluxPull = 0.22f + flux * 0.28f
-            val targetHue = normalizeHue(
-                screenHue +
-                    delta * fluxPull +
-                    phase * (0.35f + energy * 0.65f) +
-                    (audioHue - 180f) * 0.06f * (i % 2)
-            )
-            val targetSat = (
-                screenSat * 0.62f +
-                    (0.45f + energy * 0.55f) * 0.28f +
-                    flux * 0.22f
-                ).coerceIn(0.28f, 1f)
-            val targetValue = (
-                screenValue * 0.48f +
-                    LightingSettings.audioBrightnessValue(
-                        band0 + band1,
-                        band2 + band3,
-                        band4 + band5,
-                        flash
-                    ) * 0.52f
-                ).coerceIn(0.06f, 1f)
+            val audioInfluence = (0.08f + flux * 0.12f).coerceIn(0.08f, 0.20f) * chroma
+            val zoneVariation = ZONE_HUE_PHASES[zone % ZONE_HUE_PHASES.size] * 0.08f * chroma
+            val targetHue = if (chroma > 0.04f) {
+                normalizeHue(screenHue + delta * audioInfluence + zoneVariation)
+            } else {
+                screenHue
+            }
 
-            hsvToRgb(targetHue, targetSat, targetValue * (1f + pulse))
+            // Keep vivid screen colours vivid. For genuinely colourful pixels,
+            // audio may add a modest saturation boost; for neutral pixels, preserve
+            // the measured neutrality instead of inventing a blue/purple tint.
+            val audioSat = (0.72f + energy * 0.20f + flux * 0.18f).coerceIn(0f, 1f)
+            val targetSat = if (chroma < 0.04f) {
+                chroma
+            } else {
+                (screenSat * 0.84f + audioSat * 0.16f).coerceIn(0.20f, 1f)
+            }
+
+            // Brightness follows the screen closely. Audio and beat provide motion,
+            // but they do not dominate the colour or wash it toward white.
+            val audioValue = LightingSettings.audioBrightnessValue(
+                band0 + band1,
+                band2 + band3,
+                band4 + band5,
+                flash
+            )
+            val targetValue = (screenValue * 0.82f + audioValue * 0.18f)
+                .coerceIn(0.04f, 1f)
+
+            hsvToRgb(
+                targetHue,
+                targetSat,
+                (targetValue * (1f + pulse * 0.35f)).coerceIn(0f, 1f)
+            )
             smoothRgb(dst, hsvOut[0], hsvOut[1], hsvOut[2], out)
         }
     }
@@ -574,7 +587,7 @@ class HueLightController(context: Context) {
         private const val AUDIO_HUE_BASS = 360f     // bass-heavy => red
         private const val AUDIO_HUE_TREBLE = 220f   // treble-heavy => blue
         private const val AUDIO_SAT = 0.92f
-        private const val COLOR_SMOOTH = 0.022f     // ~0.9 s response at 50 Hz
+        private const val COLOR_SMOOTH = 0.065f     // ~0.31 s response at 50 Hz
         private const val MAX_BEAT_PULSE = 0.16f
 
         // Physical-light order around a TV-like arrangement: top row, right side,
