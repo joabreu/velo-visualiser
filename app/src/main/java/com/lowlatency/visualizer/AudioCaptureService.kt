@@ -12,22 +12,16 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
-import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
-import android.graphics.PixelFormat
-import android.view.Display
-import android.hardware.display.DisplayManager
-import android.hardware.display.VirtualDisplay
-import android.os.Handler
-import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Process
+import android.util.DisplayMetrics
+import android.view.Display
 import android.util.Log
 import androidx.annotation.RequiresPermission
 import androidx.core.content.IntentCompat
 import kotlin.concurrent.thread
-import kotlin.math.max
 import kotlin.math.sqrt
 
 /**
@@ -91,11 +85,7 @@ class AudioCaptureService : Service() {
     private var record: AudioRecord? = null
     private var readerThread: Thread? = null
 
-    private var screenReader: ImageReader? = null
-    private var screenDisplay: VirtualDisplay? = null
-    private var screenThread: HandlerThread? = null
-    private var screenHandler: Handler? = null
-    private val screenAnalyzer = ScreenColorAnalyzer()
+    private var screenCapture: ScreenTextureCapture? = null
 
     // Background audio analysis state. This deliberately lives in the foreground
     // service rather than VisualizerRenderer so system-audio/Hue sync survives
@@ -107,13 +97,6 @@ class AudioCaptureService : Service() {
     private var bassRatioSmooth = 0.5f
     private val beatWindow = FloatArray(1024)
     private var beatWindowCount = 0
-
-    // Service-owned FFT data used by Hue while the Activity is backgrounded.
-    private val fftBands = FloatArray(3)
-    private val fftMagnitudes = FloatArray(128)
-    private val fftPeaks = FloatArray(128)
-    private val previousMagnitudes = FloatArray(128)
-    private var havePreviousSpectrum = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -237,7 +220,6 @@ class AudioCaptureService : Service() {
                     CaptureHealth.markRawAudio()
                     analysePlaybackAudio(buf, read)
                     NativeBridge.nativePushPcm(buf, read / CHANNELS, CHANNELS, SYSTEM_AUDIO_GAIN)
-                    updateSystemSpectrum()
                 } else if (read < 0) {
                     // Mid-session death (route lost, permission revoked, …):
                     // stop the whole service so the notification clears and the
@@ -253,53 +235,6 @@ class AudioCaptureService : Service() {
             }
         }
         Log.i(TAG, "System-audio capture started.")
-    }
-
-    /** Pull the same native 128-bin FFT used by the renderer and publish a
-     * six-band envelope plus spectral flux for the background Hue path. */
-    private fun updateSystemSpectrum() {
-        val n = NativeBridge.fillLatestAll(fftBands, fftMagnitudes, fftPeaks, 0.02f)
-        if (n <= 0) return
-
-        val ranges = intArrayOf(1, 4, 8, 16, 32, 64, 128)
-        val bands = FloatArray(6)
-        for (b in 0 until 6) {
-            var sum = 0f
-            var count = 0
-            for (i in ranges[b] until ranges[b + 1]) {
-                if (i < fftMagnitudes.size) {
-                    val v = fftMagnitudes[i].coerceAtLeast(0f)
-                    sum += v * v
-                    count++
-                }
-            }
-            bands[b] = if (count > 0) sqrt(sum / count).coerceIn(0f, 1f) else 0f
-        }
-
-        var flux = 0f
-        if (havePreviousSpectrum) {
-            var positive = 0f
-            var total = 0f
-            for (i in fftMagnitudes.indices) {
-                val now = fftMagnitudes[i].coerceAtLeast(0f)
-                val prev = previousMagnitudes[i].coerceAtLeast(0f)
-                positive += (now - prev).coerceAtLeast(0f)
-                total += now
-                previousMagnitudes[i] = now
-            }
-            flux = (positive / (total + 1e-4f) * 3.0f).coerceIn(0f, 1f)
-        } else {
-            for (i in fftMagnitudes.indices) previousMagnitudes[i] = fftMagnitudes[i]
-            havePreviousSpectrum = true
-        }
-
-        AudioSyncBus.band0 = bands[0]
-        AudioSyncBus.band1 = bands[1]
-        AudioSyncBus.band2 = bands[2]
-        AudioSyncBus.band3 = bands[3]
-        AudioSyncBus.band4 = bands[4]
-        AudioSyncBus.band5 = bands[5]
-        AudioSyncBus.spectralFlux = flux
     }
 
     /**
@@ -382,76 +317,32 @@ class AudioCaptureService : Service() {
     }
 
     /**
-     * Reuses the MediaProjection already granted for system audio to capture
-     * the display into a small RGBA frame for perimeter colour extraction.
+     * Capture the complete default display through a SurfaceTexture/GLES path.
+     *
+     * The MediaProjection target is a SurfaceTexture rather than ImageReader.
+     * This is the same basic architecture used by Android-TV ambient-light
+     * applications: the projection is consumed as an external GL texture, then
+     * only a tiny 4x3 colour reduction is read back.
      */
     private fun startScreenCapture(mp: MediaProjection) {
-        val metrics = android.util.DisplayMetrics()
-        val display = getSystemService(DisplayManager::class.java)
+        val metrics = DisplayMetrics()
+        val display = getSystemService(android.hardware.display.DisplayManager::class.java)
             ?.getDisplay(Display.DEFAULT_DISPLAY)
         if (display != null) {
             display.getRealMetrics(metrics)
         } else {
             metrics.setTo(resources.displayMetrics)
         }
-        val sourceWidth = metrics.widthPixels.coerceAtLeast(320)
-        val sourceHeight = metrics.heightPixels.coerceAtLeast(180)
 
-        // Capture the complete physical display at its native dimensions.
-        // Do not downscale the VirtualDisplay: on Android TV the logical
-        // metrics may otherwise result in only part of the framebuffer being
-        // mirrored into the ImageReader.
-        val width = sourceWidth
-        val height = sourceHeight
-
-        screenThread = HandlerThread("VeloScreenCapture").also { it.start() }
-        screenHandler = Handler(screenThread!!.looper)
-
-        val reader = ImageReader.newInstance(
-            width,
-            height,
-            PixelFormat.RGBA_8888,
-            3
-        )
-        screenReader = reader
-
-        reader.setOnImageAvailableListener({ imageReader ->
-            val image = imageReader.acquireLatestImage()
-                ?: return@setOnImageAvailableListener
-
-            try {
-                val crop = image.cropRect
-                if (crop.width() != image.width || crop.height() != image.height) {
-                    Log.w(
-                        TAG,
-                        "MediaProjection delivered cropped frame: " +
-                            "image=${image.width}x${image.height} " +
-                            "crop=${crop.left},${crop.top}-${crop.right},${crop.bottom}"
-                    )
-                }
-                ScreenSyncBus.publish(screenAnalyzer.analyse(image))
-            } catch (t: Throwable) {
-                Log.w(TAG, "Screen colour analysis failed", t)
-            } finally {
-                image.close()
-            }
-        }, screenHandler)
-
-        screenDisplay = mp.createVirtualDisplay(
-            "VeloScreenSync",
-            width,
-            height,
-            metrics.densityDpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            reader.surface,
-            null,
-            screenHandler
-        )
+        val capture = ScreenTextureCapture(mp, metrics) { rgb ->
+            ScreenSyncBus.publish(rgb)
+        }
+        screenCapture = capture
+        capture.start()
 
         Log.i(
             TAG,
-            "Screen capture started: real=${sourceWidth}x${sourceHeight} " +
-                "virtual=${width}x${height} densityDpi=${metrics.densityDpi}"
+            "GPU screen capture started: display=${metrics.widthPixels}x${metrics.heightPixels}"
         )
     }
 
@@ -518,18 +409,8 @@ class AudioCaptureService : Service() {
         record?.runCatching { release() }
         record = null
 
-        screenReader?.setOnImageAvailableListener(null, null)
-        screenDisplay?.runCatching { release() }
-        screenDisplay = null
-        screenReader?.runCatching { close() }
-        screenReader = null
-
-        screenThread?.runCatching {
-            quitSafely()
-            join(300)
-        }
-        screenThread = null
-        screenHandler = null
+        screenCapture?.stop()
+        screenCapture = null
 
         ScreenSyncBus.clear()
         AudioSyncBus.reset()
