@@ -204,7 +204,7 @@ class ScreenTextureCapture(
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
             GLES20.glUniform1i(texture, 0)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-            GLES20.glFlush()
+            GLES20.glFinish()
 
             val pixels = frameBuffer ?: return
             pixels.clear()

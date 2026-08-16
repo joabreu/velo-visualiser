@@ -398,24 +398,19 @@ class HueLightController(context: Context) {
             smoothedRgb = FloatArray(count * 3)
         }
 
-        // Keep the ImageReader/full-screen spatial capture untouched.
-        // Screen RGB is the primary source; audio only modulates hue/saturation.
+        // Screen RGB is authoritative for screen mirroring.
+        // Audio is used only to modulate brightness.
         val low = (band0 + band1).coerceAtLeast(0f)
         val mid = (band2 + band3).coerceAtLeast(0f)
         val high = (band4 + band5).coerceAtLeast(0f)
-        val total = low + mid + high + 0.0001f
 
-        val bass = low / total
-        val mids = mid / total
-        val treble = high / total
-        val energy = loudness.coerceIn(0f, 1f)
         val beat = flash.coerceIn(0f, MAX_BEAT_PULSE)
 
-        // Deliberately use clearly separated musical hue regions.
-        val audioHue = normalizeHue(
-            8f * bass +
-                120f * mids +
-                220f * treble
+        val audioValue = LightingSettings.audioBrightnessValue(
+            low,
+            mid,
+            high,
+            flash
         )
 
         for (i in 0 until count) {
@@ -423,87 +418,43 @@ class HueLightController(context: Context) {
             val src = zone * 3
             val dst = i * 3
 
-            rgbToHsv(
-                screen[src].coerceIn(0f, 1f),
-                screen[src + 1].coerceIn(0f, 1f),
-                screen[src + 2].coerceIn(0f, 1f)
-            )
+            val screenR = screen[src].coerceIn(0f, 1f)
+            val screenG = screen[src + 1].coerceIn(0f, 1f)
+            val screenB = screen[src + 2].coerceIn(0f, 1f)
 
-            val screenHue = hsvIn[0]
-            val screenSat = hsvIn[1].coerceIn(0f, 1f)
-            val screenValue = hsvIn[2].coerceIn(0f, 1f)
+            // Preserve the actual screen colour. Do not convert to HSV and
+            // replace the hue with the audio spectrum.
+            val screenValue = maxOf(screenR, screenG, screenB)
 
-            // Never let neutral screen pixels collapse to HSV saturation=0.
-            // This is the key fix for the all-white output.
-            val audioMix = if (screenSat >= 0.12f) {
-                // Preserve strong video colours.
-                (0.10f + flux * 0.18f + energy * 0.08f)
-                    .coerceIn(0.10f, 0.34f)
-             } else {
-                // White/grey video gets a strong musical colour.
-                (0.68f + flux * 0.10f + energy * 0.08f)
-                    .coerceIn(0.68f, 0.86f)
-             }
- 
-            var hue = normalizeHue(
-                screenHue +
-                    shortestHueDelta(screenHue, audioHue) * audioMix
-            )
+            // Audio provides only a small brightness contribution.
+            val brightness = (
+                screenValue * 0.90f +
+                    audioValue * 0.10f
+            ).coerceIn(0.03f, 1f)
 
-            // Spatial variation: preserve screen zones while allowing
-            // neighbouring Hue lights to have visibly different tones.
-            if (count > 1) {
-                val position = i.toFloat() / (count - 1)
-                hue = normalizeHue(hue + (position - 0.5f) * 22f)
+            // Scale all RGB channels together so the original screen hue
+            // and saturation are preserved.
+            val scale = if (screenValue > 0.0001f) {
+                brightness / screenValue
+            } else {
+                0f
             }
 
-            // Beat changes colour/brightness gently rather than strobing.
-            hue = normalizeHue(hue - beat * 10f)
+            // Beat produces a modest brightness pulse without changing hue.
+            val beatMultiplier = 1f + beat * 0.12f
 
-            // Crucially, neutral screen pixels get real saturation.
-            val audioSaturation = (
-                0.62f +
-                    energy * 0.18f +
-                    flux * 0.16f +
-                    beat * 0.08f
-                ).coerceIn(0.58f, 0.96f)
-
-            val saturation = if (screenSat >= 0.12f) {
-                // Vividify actual screen colours instead of washing them out.
-                (screenSat * 1.22f + audioSaturation * 0.08f)
-                    .coerceIn(0.48f, 1f)
-             } else {
-                audioSaturation
-             }
- 
-            // Keep video brightness dominant; audio supplies only a controlled
-            // lift so the lights remain responsive without flashing.
-             val audioValue = LightingSettings.audioBrightnessValue(
-                low,
-                mid,
-                high,
-                 flash
-             )
-
-            val value = (
-                screenValue * 0.84f +
-                    audioValue * 0.16f
-                ).coerceIn(0.06f, 1f)
-
-            val beatValue = (
-                value * (1f + beat * 0.16f)
-            ).coerceIn(0f, 1f)
-
-            hsvToRgb(hue, saturation, beatValue)
+            val r = (screenR * scale * beatMultiplier).coerceIn(0f, 1f)
+            val g = (screenG * scale * beatMultiplier).coerceIn(0f, 1f)
+            val b = (screenB * scale * beatMultiplier).coerceIn(0f, 1f)
 
             // Existing smoothing remains in place to avoid dizziness/strobing.
             smoothRgb(
                 dst,
-                hsvOut[0],
-                hsvOut[1],
-                hsvOut[2],
+                r,
+                g,
+                b,
                 out
-             )
+            )
         }
     }
 
