@@ -1,23 +1,18 @@
 package com.lowlatency.visualizer
 
 import android.media.Image
-import kotlin.math.atan2
 
 /**
- * Extracts eight spatial colour zones from the ENTIRE captured display.
+ * Extracts colour from the complete captured display using a 4 x 3 grid.
  *
- * Every sampled pixel contributes to exactly one zone. This is important for
- * video players such as Stremio: the video normally occupies the centre of
- * the display, so sampling only the outer edge misses most of the picture.
- *
- * The eight zones are angular sectors around the centre of the screen, keeping
- * the mapping useful for lights arranged around a TV while still making the
- * complete screen contribute to the result.
+ * Every grid cell is sampled across its full area. The centre of a Stremio
+ * video therefore contributes just as much as the edges; this is deliberately
+ * not a perimeter-only sampler.
  */
 class ScreenColorAnalyzer {
     companion object {
-        private const val X_SAMPLES = 24
-        private const val Y_SAMPLES = 14
+        private const val X_SAMPLES = 32
+        private const val Y_SAMPLES = 24
         private const val ZONES = ScreenSyncBus.ZONES
     }
 
@@ -46,19 +41,19 @@ class ScreenColorAnalyzer {
         if (pixelStride < 4 || width <= 0 || height <= 0) return output
 
         for (sy in 0 until Y_SAMPLES) {
-            val y = ((sy + 0.5f) * height / Y_SAMPLES)
-                .toInt()
+            val y = ((sy + 0.5f) * height / Y_SAMPLES).toInt()
                 .coerceIn(0, height - 1)
+            val rowBase = y * rowStride
 
             for (sx in 0 until X_SAMPLES) {
-                val x = ((sx + 0.5f) * width / X_SAMPLES)
-                    .toInt()
+                val x = ((sx + 0.5f) * width / X_SAMPLES).toInt()
                     .coerceIn(0, width - 1)
-
-                val offset = y * rowStride + x * pixelStride
+                val offset = rowBase + x * pixelStride
                 if (offset < 0 || offset + 3 >= buffer.limit()) continue
 
-                val zone = zoneFor(x, y, width, height)
+                val col = (sx * ScreenSyncBus.COLUMNS) / X_SAMPLES
+                val row = (sy * ScreenSyncBus.ROWS) / Y_SAMPLES
+                val zone = row * ScreenSyncBus.COLUMNS + col
 
                 red[zone] += buffer.get(offset).toInt() and 0xff
                 green[zone] += buffer.get(offset + 1).toInt() and 0xff
@@ -68,9 +63,9 @@ class ScreenColorAnalyzer {
         }
 
         for (zone in 0 until ZONES) {
-            if (count[zone] == 0) continue
-
-            val scale = 1f / (count[zone] * 255f)
+            val n = count[zone]
+            if (n == 0) continue
+            val scale = 1f / (n * 255f)
             val p = zone * 3
             output[p] = red[zone] * scale
             output[p + 1] = green[zone] * scale
@@ -78,19 +73,5 @@ class ScreenColorAnalyzer {
         }
 
         return output
-    }
-
-    private fun zoneFor(x: Int, y: Int, width: Int, height: Int): Int {
-        val nx = (x + 0.5f) / width - 0.5f
-        val ny = (y + 0.5f) / height - 0.5f
-
-        // +Y is downward. Zone 0 starts at the top and zones progress
-        // clockwise around the display.
-        var angle = atan2(nx.toDouble(), -ny.toDouble())
-        if (angle < 0.0) angle += Math.PI * 2.0
-
-        return ((angle / (Math.PI * 2.0)) * ZONES)
-            .toInt()
-            .coerceIn(0, ZONES - 1)
     }
 }

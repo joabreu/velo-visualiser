@@ -1,16 +1,18 @@
 package com.lowlatency.visualizer
 
 /**
- * Latest perimeter colour frame captured from the Android display.
+ * Latest spatial colour frame captured from the complete Android display.
  *
- * Zones:
+ * The frame is divided into a 4 x 3 grid:
  *
- *       0  1  2
- *       7     3
- *       6  5  4
+ *       0  1  2  3
+ *       4  5  6  7
+ *       8  9 10 11
  */
 object ScreenSyncBus {
-    const val ZONES = 8
+    const val COLUMNS = 4
+    const val ROWS = 3
+    const val ZONES = COLUMNS * ROWS
     const val COMPONENTS = ZONES * 3
 
     @Volatile
@@ -21,7 +23,8 @@ object ScreenSyncBus {
         private set
 
     fun publish(rgb: FloatArray) {
-        latest = rgb.copyOf()
+        if (rgb.size < COMPONENTS) return
+        latest = rgb.copyOf(COMPONENTS)
         active = true
         CaptureHealth.markScreen()
     }

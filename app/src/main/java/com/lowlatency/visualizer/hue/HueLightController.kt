@@ -250,6 +250,14 @@ class HueLightController(context: Context) {
                 val audioLoudness = if (systemAudio) AudioSyncBus.loudness else BeatBus.loudness
                 val audioBassRatio = if (systemAudio) AudioSyncBus.bassRatio else BeatBus.bassRatio
                 val audioBeatCount = if (systemAudio) AudioSyncBus.beatCount else BeatBus.beatCount
+                val band0 = if (systemAudio) AudioSyncBus.band0 else l * 1.10f
+                val band1 = if (systemAudio) AudioSyncBus.band1 else l
+                val band2 = if (systemAudio) AudioSyncBus.band2 else m * 1.15f
+                val band3 = if (systemAudio) AudioSyncBus.band3 else m
+                val band4 = if (systemAudio) AudioSyncBus.band4 else h * 1.15f
+                val band5 = if (systemAudio) AudioSyncBus.band5 else h
+                val spectralFlux = if (systemAudio) AudioSyncBus.spectralFlux else
+                    ((h - l).coerceAtLeast(0f) * 0.7f + audioLoudness * 0.3f).coerceIn(0f, 1f)
 
                 // Ableton Link's beat polling belongs to the GL thread. For system
                 // playback we instead use the service-owned audio analysis so the
@@ -319,7 +327,7 @@ class HueLightController(context: Context) {
                     if (bc != lastBeat) {
                         // Beat controls a slower, visible colour/brightness pulse.
                         // Keep the strongest pulse when beats arrive close together.
-                        flash = maxOf(flash, (audioLoudness * 0.18f).coerceIn(0f, 0.18f))
+                        flash = maxOf(flash, (audioLoudness * MAX_BEAT_PULSE).coerceIn(0f, MAX_BEAT_PULSE))
                         lastBeat = bc
                         lightBeatCount++
                     }
@@ -330,14 +338,21 @@ class HueLightController(context: Context) {
                         mapScreenColors(
                             channelIds.size,
                             screenRgb,
-                            l,
-                            m,
-                            h,
+                            band0, band1, band2, band3, band4, band5,
+                            audioLoudness,
+                            spectralFlux,
                             flash,
                             rgb
                         )
                     } else {
-                        mapColors(channelIds.size, l, m, h, flash, rgb)
+                        mapColors(
+                            channelIds.size,
+                            band0, band1, band2, band3, band4, band5,
+                            audioLoudness,
+                            spectralFlux,
+                            flash,
+                            rgb
+                        )
                     }
                 }
 
@@ -356,74 +371,141 @@ class HueLightController(context: Context) {
     }
 
     /**
-     * Screen colour supplies the spatial component while the existing audio
-     * brightness/beat processing supplies the temporal component.
+     * Mixes the colour of each full-screen zone with the instantaneous
+     * six-band musical spectrum. Screen colour remains spatially dominant,
+     * while spectrum changes hue/saturation and flux adds a short-lived
+     * creative accent. Each light has its own zone and therefore its own
+     * target colour.
      */
     private fun mapScreenColors(
         count: Int,
         screen: FloatArray,
-        low: Float,
-        mid: Float,
-        high: Float,
+        band0: Float,
+        band1: Float,
+        band2: Float,
+        band3: Float,
+        band4: Float,
+        band5: Float,
+        loudness: Float,
+        flux: Float,
         flash: Float,
         out: FloatArray,
     ) {
         if (count <= 0) return
         if (smoothedRgb.size != count * 3) smoothedRgb = FloatArray(count * 3)
 
-        val low2 = low * low
-        val mid2 = mid * mid
-        val high2 = high * high
-        val total = low2 + mid2 + high2 + 1e-4f
-        val audioPos = ((mid2 * 0.35f + high2) / total).coerceIn(0f, 1f)
-        val audioHue = AUDIO_HUE_BASS + (AUDIO_HUE_TREBLE - AUDIO_HUE_BASS) * audioPos
-        val value = LightingSettings.audioBrightnessValue(low, mid, high, flash)
-        val pulse = flash.coerceIn(0f, 0.18f)
+        val bands = floatArrayOf(band0, band1, band2, band3, band4, band5)
+        val audioHue = spectralHue(bands)
+        val energy = (bands.sum() / bands.size).coerceIn(0f, 1f)
+        val pulse = flash.coerceIn(0f, MAX_BEAT_PULSE)
 
         for (i in 0 until count) {
-            val zone = if (count == 1) ScreenSyncBus.ZONES / 2 else
-                ((i.toFloat() / count) * ScreenSyncBus.ZONES).toInt().coerceIn(0, ScreenSyncBus.ZONES - 1)
+            val zone = SCREEN_ZONE_ORDER[i % SCREEN_ZONE_ORDER.size]
             val src = zone * 3
             val dst = i * 3
+
             rgbToHsv(screen[src], screen[src + 1], screen[src + 2])
             val screenHue = hsvIn[0]
-            val hueDelta = shortestHueDelta(screenHue, audioHue)
-            val targetHue = normalizeHue(screenHue + hueDelta * 0.35f)
-            val targetSat = (hsvIn[1] * 0.70f + AUDIO_SAT * 0.30f).coerceIn(0.35f, 1f)
-            val targetValue = (hsvIn[2] * 0.45f + value * 0.55f).coerceIn(0.08f, 1f)
-            hsvToRgb(targetHue, targetSat, targetValue)
-            val beatBoost = 1f + pulse
-            val tr = (hsvOut[0] * beatBoost).coerceIn(0f, 1f)
-            val tg = (hsvOut[1] * beatBoost).coerceIn(0f, 1f)
-            val tb = (hsvOut[2] * beatBoost).coerceIn(0f, 1f)
-            smoothedRgb[dst] += COLOR_SMOOTH * (tr - smoothedRgb[dst])
-            smoothedRgb[dst + 1] += COLOR_SMOOTH * (tg - smoothedRgb[dst + 1])
-            smoothedRgb[dst + 2] += COLOR_SMOOTH * (tb - smoothedRgb[dst + 2])
-            out[dst] = smoothedRgb[dst]
-            out[dst + 1] = smoothedRgb[dst + 1]
-            out[dst + 2] = smoothedRgb[dst + 2]
+            val screenSat = hsvIn[1]
+            val screenValue = hsvIn[2]
+
+            // Strong musical changes pull the screen colour further toward the
+            // spectral colour. A small per-zone phase keeps simultaneous lights
+            // from collapsing onto one tone even when the soundtrack is uniform.
+            val phase = ZONE_HUE_PHASES[zone % ZONE_HUE_PHASES.size]
+            val delta = shortestHueDelta(screenHue, audioHue)
+            val fluxPull = 0.22f + flux * 0.28f
+            val targetHue = normalizeHue(
+                screenHue +
+                    delta * fluxPull +
+                    phase * (0.35f + energy * 0.65f) +
+                    (audioHue - 180f) * 0.06f * (i % 2)
+            )
+            val targetSat = (
+                screenSat * 0.62f +
+                    (0.45f + energy * 0.55f) * 0.28f +
+                    flux * 0.22f
+                ).coerceIn(0.28f, 1f)
+            val targetValue = (
+                screenValue * 0.48f +
+                    LightingSettings.audioBrightnessValue(
+                        band0 + band1,
+                        band2 + band3,
+                        band4 + band5,
+                        flash
+                    ) * 0.52f
+                ).coerceIn(0.06f, 1f)
+
+            hsvToRgb(targetHue, targetSat, targetValue * (1f + pulse))
+            smoothRgb(dst, hsvOut[0], hsvOut[1], hsvOut[2], out)
         }
     }
 
-    private fun mapColors(count: Int, low: Float, mid: Float, high: Float, flash: Float, out: FloatArray) {
+    private fun mapColors(
+        count: Int,
+        band0: Float,
+        band1: Float,
+        band2: Float,
+        band3: Float,
+        band4: Float,
+        band5: Float,
+        loudness: Float,
+        flux: Float,
+        flash: Float,
+        out: FloatArray,
+    ) {
         if (count <= 0) return
         if (smoothedRgb.size != count * 3) smoothedRgb = FloatArray(count * 3)
-        val total = low + mid + high + 1e-3f
-        val centroid = ((mid * 0.35f + high) / total).coerceIn(0f, 1f)
-        val value = LightingSettings.audioBrightnessValue(low, mid, high, flash)
-        val pulse = flash.coerceIn(0f, 0.18f)
+
+        val bands = floatArrayOf(band0, band1, band2, band3, band4, band5)
+        val hue = spectralHue(bands)
+        val energy = (bands.sum() / bands.size).coerceIn(0f, 1f)
+        val value = LightingSettings.audioBrightnessValue(
+            band0 + band1,
+            band2 + band3,
+            band4 + band5,
+            flash
+        )
         for (i in 0 until count) {
-            val spread = if (count > 1) (i.toFloat() / (count - 1) - 0.5f) * 110f else 0f
-            val hue = AUDIO_HUE_BASS + (AUDIO_HUE_TREBLE - AUDIO_HUE_BASS) * centroid + spread
-            hsvToRgb(hue, AUDIO_SAT, value * (1f + pulse))
-            val dst = i * 3
-            smoothedRgb[dst] += COLOR_SMOOTH * (hsvOut[0].coerceIn(0f, 1f) - smoothedRgb[dst])
-            smoothedRgb[dst + 1] += COLOR_SMOOTH * (hsvOut[1].coerceIn(0f, 1f) - smoothedRgb[dst + 1])
-            smoothedRgb[dst + 2] += COLOR_SMOOTH * (hsvOut[2].coerceIn(0f, 1f) - smoothedRgb[dst + 2])
-            out[dst] = smoothedRgb[dst]
-            out[dst + 1] = smoothedRgb[dst + 1]
-            out[dst + 2] = smoothedRgb[dst + 2]
+            val phase = ZONE_HUE_PHASES[i % ZONE_HUE_PHASES.size]
+            val alternating = if ((i and 1) == 0) flux * 18f else -flux * 14f
+            hsvToRgb(
+                normalizeHue(hue + phase * (0.55f + energy * 0.45f) + alternating),
+                (0.62f + energy * 0.30f + flux * 0.18f).coerceIn(0f, 1f),
+                value.coerceIn(0f, 1f)
+            )
+            smoothRgb(i * 3, hsvOut[0], hsvOut[1], hsvOut[2], out)
         }
+    }
+
+    private fun smoothRgb(dst: Int, r: Float, g: Float, b: Float, out: FloatArray) {
+        smoothedRgb[dst] += COLOR_SMOOTH * (r.coerceIn(0f, 1f) - smoothedRgb[dst])
+        smoothedRgb[dst + 1] += COLOR_SMOOTH * (g.coerceIn(0f, 1f) - smoothedRgb[dst + 1])
+        smoothedRgb[dst + 2] += COLOR_SMOOTH * (b.coerceIn(0f, 1f) - smoothedRgb[dst + 2])
+        out[dst] = smoothedRgb[dst]
+        out[dst + 1] = smoothedRgb[dst + 1]
+        out[dst + 2] = smoothedRgb[dst + 2]
+    }
+
+    /**
+     * Circularly blends six spectral bands into a hue. The palette deliberately
+     * spans warm, green/cyan and blue/magenta regions, so the soundtrack can
+     * escape the old red->blue-only tonal range.
+     */
+    private fun spectralHue(bands: FloatArray): Float {
+        val hues = floatArrayOf(8f, 42f, 105f, 180f, 245f, 315f)
+        var x = 0.0
+        var y = 0.0
+        for (i in bands.indices) {
+            val radians = Math.toRadians(hues[i].toDouble())
+            val w = bands[i].coerceAtLeast(0f).toDouble()
+            x += kotlin.math.cos(radians) * w
+            y += kotlin.math.sin(radians) * w
+        }
+        if (x * x + y * y < 1e-8) return 240f
+        var h = Math.toDegrees(kotlin.math.atan2(y, x)).toFloat()
+        if (h < 0f) h += 360f
+        return h
     }
 
     // Reused HSV->RGB scratch (written on the sender thread only). h in degrees,
@@ -488,8 +570,14 @@ class HueLightController(context: Context) {
         // wheel (red → magenta/purple → blue), skipping the murky greens/yellows.
         private const val AUDIO_HUE_BASS = 360f     // bass-heavy => red
         private const val AUDIO_HUE_TREBLE = 220f   // treble-heavy => blue
-        private const val AUDIO_SAT = 0.92f         // vivid resting saturation
-        private const val AUDIO_CHANNEL_SPREAD = 0.22f  // hue fan across multiple lights
-        private const val COLOR_SMOOTH = 0.015f     // slow colour transition at 50 Hz
+        private const val AUDIO_SAT = 0.92f
+        private const val COLOR_SMOOTH = 0.022f     // ~0.9 s response at 50 Hz
+        private const val MAX_BEAT_PULSE = 0.16f
+
+        // Physical-light order around a TV-like arrangement: top row, right side,
+        // bottom row, left side, then centre cells. Each light therefore samples
+        // a genuinely different part of the complete frame.
+        private val SCREEN_ZONE_ORDER = intArrayOf(0, 1, 2, 3, 7, 11, 10, 9, 8, 4, 5, 6)
+        private val ZONE_HUE_PHASES = floatArrayOf(-22f, 14f, -12f, 24f, -18f, 18f, -28f, 12f, -15f, 20f, -10f, 16f)
     }
 }
