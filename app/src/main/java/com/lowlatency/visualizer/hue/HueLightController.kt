@@ -215,18 +215,21 @@ class HueLightController(context: Context) {
                     if (screenFresh && ScreenSyncBus.active &&
                         ScreenSyncBus.snapshotInto(screenRgb)
                     ) {
-                        val al = if (BeatSettings.systemAudio && analysisFresh) AudioSyncBus.low else if (analysisFresh) low else 0f
-                        val am = if (BeatSettings.systemAudio && analysisFresh) AudioSyncBus.mid else if (analysisFresh) mid else 0f
-                        val ah = if (BeatSettings.systemAudio && analysisFresh) AudioSyncBus.high else if (analysisFresh) high else 0f
-                        val af = if (BeatSettings.systemAudio && analysisFresh) AudioSyncBus.loudness else if (analysisFresh) BeatBus.loudness else 0f
+                        val useSystem = BeatSettings.systemAudio && analysisFresh
+                        val bal0 = if (useSystem) AudioSyncBus.band0 else if (analysisFresh) low * 1.10f else 0f
+                        val bal1 = if (useSystem) AudioSyncBus.band1 else if (analysisFresh) low else 0f
+                        val bal2 = if (useSystem) AudioSyncBus.band2 else if (analysisFresh) mid * 1.15f else 0f
+                        val bal3 = if (useSystem) AudioSyncBus.band3 else if (analysisFresh) mid else 0f
+                        val bal4 = if (useSystem) AudioSyncBus.band4 else if (analysisFresh) high * 1.15f else 0f
+                        val bal5 = if (useSystem) AudioSyncBus.band5 else if (analysisFresh) high else 0f
+                        val balLoudness = if (useSystem) AudioSyncBus.loudness else if (analysisFresh) BeatBus.loudness else 0f
+                        val balFlux = if (useSystem) AudioSyncBus.spectralFlux else 0f
+                        val balFlash = if (analysisFresh) flash else 0f
                         mapScreenColors(
                             channelIds.size,
                             screenRgb,
-                            low = al,
-                            mid = am,
-                            high = ah,
-                            flash = af,
-                            out = rgb
+                            bal0, bal1, bal2, bal3, bal4, bal5,
+                            balLoudness, balFlux, balFlash, rgb
                         )
                     }
                     c.send(channelIds, rgb)

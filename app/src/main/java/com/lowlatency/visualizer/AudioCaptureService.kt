@@ -16,6 +16,7 @@ import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.graphics.PixelFormat
+import android.view.Display
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.os.Handler
@@ -106,6 +107,13 @@ class AudioCaptureService : Service() {
     private var bassRatioSmooth = 0.5f
     private val beatWindow = FloatArray(1024)
     private var beatWindowCount = 0
+
+    // Service-owned FFT data used by Hue while the Activity is backgrounded.
+    private val fftBands = FloatArray(3)
+    private val fftMagnitudes = FloatArray(128)
+    private val fftPeaks = FloatArray(128)
+    private val previousMagnitudes = FloatArray(128)
+    private var havePreviousSpectrum = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -229,6 +237,7 @@ class AudioCaptureService : Service() {
                     CaptureHealth.markRawAudio()
                     analysePlaybackAudio(buf, read)
                     NativeBridge.nativePushPcm(buf, read / CHANNELS, CHANNELS, SYSTEM_AUDIO_GAIN)
+                    updateSystemSpectrum()
                 } else if (read < 0) {
                     // Mid-session death (route lost, permission revoked, …):
                     // stop the whole service so the notification clears and the
@@ -244,6 +253,53 @@ class AudioCaptureService : Service() {
             }
         }
         Log.i(TAG, "System-audio capture started.")
+    }
+
+    /** Pull the same native 128-bin FFT used by the renderer and publish a
+     * six-band envelope plus spectral flux for the background Hue path. */
+    private fun updateSystemSpectrum() {
+        val n = NativeBridge.fillLatestAll(fftBands, fftMagnitudes, fftPeaks, 0.02f)
+        if (n <= 0) return
+
+        val ranges = intArrayOf(1, 4, 8, 16, 32, 64, 128)
+        val bands = FloatArray(6)
+        for (b in 0 until 6) {
+            var sum = 0f
+            var count = 0
+            for (i in ranges[b] until ranges[b + 1]) {
+                if (i < fftMagnitudes.size) {
+                    val v = fftMagnitudes[i].coerceAtLeast(0f)
+                    sum += v * v
+                    count++
+                }
+            }
+            bands[b] = if (count > 0) sqrt(sum / count).coerceIn(0f, 1f) else 0f
+        }
+
+        var flux = 0f
+        if (havePreviousSpectrum) {
+            var positive = 0f
+            var total = 0f
+            for (i in fftMagnitudes.indices) {
+                val now = fftMagnitudes[i].coerceAtLeast(0f)
+                val prev = previousMagnitudes[i].coerceAtLeast(0f)
+                positive += (now - prev).coerceAtLeast(0f)
+                total += now
+                previousMagnitudes[i] = now
+            }
+            flux = (positive / (total + 1e-4f) * 3.0f).coerceIn(0f, 1f)
+        } else {
+            for (i in fftMagnitudes.indices) previousMagnitudes[i] = fftMagnitudes[i]
+            havePreviousSpectrum = true
+        }
+
+        AudioSyncBus.band0 = bands[0]
+        AudioSyncBus.band1 = bands[1]
+        AudioSyncBus.band2 = bands[2]
+        AudioSyncBus.band3 = bands[3]
+        AudioSyncBus.band4 = bands[4]
+        AudioSyncBus.band5 = bands[5]
+        AudioSyncBus.spectralFlux = flux
     }
 
     /**
@@ -330,11 +386,18 @@ class AudioCaptureService : Service() {
      * the display into a small RGBA frame for perimeter colour extraction.
      */
     private fun startScreenCapture(mp: MediaProjection) {
-        val metrics = resources.displayMetrics
+        val metrics = android.util.DisplayMetrics()
+        val display = getSystemService(DisplayManager::class.java)
+            ?.getDisplay(Display.DEFAULT_DISPLAY)
+        if (display != null) {
+            display.getRealMetrics(metrics)
+        } else {
+            metrics.setTo(resources.displayMetrics)
+        }
         val sourceWidth = metrics.widthPixels.coerceAtLeast(320)
         val sourceHeight = metrics.heightPixels.coerceAtLeast(180)
 
-        val width = minOf(sourceWidth, 960)
+        val width = minOf(sourceWidth, 1280)
         val height = max(
             180,
             (width.toFloat() * sourceHeight / sourceWidth).toInt()
@@ -375,7 +438,7 @@ class AudioCaptureService : Service() {
             screenHandler
         )
 
-        Log.i(TAG, "Screen capture started: ${width}x${height}")
+        Log.i(TAG, "Screen capture started: physical=${sourceWidth}x${sourceHeight} capture=${width}x${height}")
     }
 
     /**
