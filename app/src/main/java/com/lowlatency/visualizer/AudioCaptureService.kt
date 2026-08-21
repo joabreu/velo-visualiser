@@ -22,6 +22,9 @@ import android.util.Log
 import androidx.annotation.RequiresPermission
 import androidx.core.content.IntentCompat
 import kotlin.concurrent.thread
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
@@ -98,6 +101,25 @@ class AudioCaptureService : Service() {
     private val beatWindow = FloatArray(1024)
     private var beatWindowCount = 0
 
+    // Background six-band spectrum analysis. The existing beatWindow already
+    // gives us 1024 mono PCM samples, so the FFT adds no extra audio buffering.
+    private val fftReal = FloatArray(1024)
+    private val fftImag = FloatArray(1024)
+    private val previousMagnitude = FloatArray(513)
+    private val fftWindow = FloatArray(1024) { n ->
+        (0.5 - 0.5 * cos(2.0 * PI * n / 1023.0)).toFloat()
+    }
+
+    // Six broad musical regions.  The first two cover bass/kick energy and
+    // the final band covers cymbals/air without letting the 12-24 kHz range
+    // dominate the visual response.
+    private val bandLowHz = floatArrayOf(40f, 120f, 250f, 600f, 1500f, 4000f)
+    private val bandHighHz = floatArrayOf(120f, 250f, 600f, 1500f, 4000f, 12000f)
+
+    // Slowly follows the spectrum level. This makes band ratios largely
+    // independent of the Xiaomi/BT output volume while preserving the normal
+    // loudness path used for brightness.
+    private var spectrumReference = 1e-5f
     override fun onBind(intent: Intent?): IBinder? = null
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
@@ -309,11 +331,160 @@ class AudioCaptureService : Service() {
             if (backgroundBeatDetector.update(beatWindow) && loudness > 0f) {
                 AudioSyncBus.beatCount++
             }
+
+            // Populate the six-band fields consumed by Hue. Previously these
+            // fields were never written by the system-audio path, leaving the
+            // audio-driven colour component with zeros.
+            analyseSpectrum(beatWindow)
             beatWindowCount = 0
         }
 
         AudioSyncBus.lastAnalysisNs = System.nanoTime()
         CaptureHealth.markAudioAnalysis()
+    }
+
+    /**
+     * Analyse the same 1024 PCM samples used by the background beat detector.
+     *
+     * Produces:
+     *   band0..band5  = six relative spectral-energy bands
+     *   spectralFlux  = transient/onset strength
+     *
+     * The values are relative to a slowly-following spectrum reference, so
+     * changing the Xiaomi/Android playback volume does not simply turn the
+     * lights from dim to saturated. Absolute level remains available through
+     * AudioSyncBus.loudness for brightness/impact handling.
+     */
+    private fun analyseSpectrum(samples: FloatArray) {
+        val n = fftReal.size
+
+        for (i in 0 until n) {
+            fftReal[i] = samples[i] * fftWindow[i]
+            fftImag[i] = 0f
+        }
+
+        fftInPlace(fftReal, fftImag)
+
+        val binHz = SAMPLE_RATE.toFloat() / n.toFloat()
+        val bandEnergy = FloatArray(6)
+        var totalMagnitude = 0f
+        var flux = 0f
+
+        for (k in 1..n / 2) {
+            val re = fftReal[k]
+            val im = fftImag[k]
+            val magnitude = sqrt(re * re + im * im) / n.toFloat()
+            val previous = previousMagnitude[k]
+
+            // Positive spectral change only: sustained notes don't repeatedly
+            // trigger the impact response, while attacks do.
+            if (magnitude > previous) {
+                flux += magnitude - previous
+            }
+            previousMagnitude[k] = magnitude
+            totalMagnitude += magnitude
+
+            for (band in 0 until 6) {
+                if (binHz * k >= bandLowHz[band] && binHz * k < bandHighHz[band]) {
+                    bandEnergy[band] += magnitude * magnitude
+                    break
+                }
+            }
+        }
+
+        // RMS-like spectrum level for adaptive normalization.
+        val spectrumLevel = (totalMagnitude / (n / 2).toFloat()).coerceAtLeast(1e-7f)
+        spectrumReference += 0.05f * (spectrumLevel - spectrumReference)
+        val reference = spectrumReference.coerceAtLeast(1e-6f)
+
+        val bands = FloatArray(6)
+        var bandSum = 0f
+        for (band in 0 until 6) {
+            val raw = sqrt(bandEnergy[band])
+            // sqrt(relative) gives useful compression: bass-heavy music does
+            // not completely suppress mids/highs, but weak detail remains.
+            val relative = raw / reference
+            val value = sqrt(relative.coerceAtLeast(0f)).coerceIn(0f, 2f)
+            bands[band] = value
+            bandSum += value
+        }
+
+        if (bandSum > 1e-6f) {
+            // Preserve spectral shape while putting the values into the same
+            // useful range regardless of absolute track level.
+            val scale = 6f / bandSum
+            for (band in bands.indices) {
+                bands[band] = (bands[band] * scale).coerceIn(0f, 2f)
+            }
+        }
+
+        // Normalize positive spectral change against the current spectrum.
+        // sqrt compression gives smooth musical response instead of harsh
+        // flashes on single-bin transients.
+        val fluxNormalized = (flux / (totalMagnitude + 1e-6f)).coerceIn(0f, 1f)
+        val fluxValue = sqrt(fluxNormalized)
+
+        AudioSyncBus.band0 = bands[0]
+        AudioSyncBus.band1 = bands[1]
+        AudioSyncBus.band2 = bands[2]
+        AudioSyncBus.band3 = bands[3]
+        AudioSyncBus.band4 = bands[4]
+        AudioSyncBus.band5 = bands[5]
+        AudioSyncBus.spectralFlux = fluxValue
+    }
+
+    /** 1024-point radix-2 Cooley-Tukey FFT, in-place. */
+    private fun fftInPlace(real: FloatArray, imag: FloatArray) {
+        val n = real.size
+
+        var j = 0
+        for (i in 1 until n) {
+            var bit = n shr 1
+            while ((j and bit) != 0) {
+                j = j xor bit
+                bit = bit shr 1
+            }
+            j = j xor bit
+            if (i < j) {
+                val tr = real[i]
+                real[i] = real[j]
+                real[j] = tr
+                val ti = imag[i]
+                imag[i] = imag[j]
+                imag[j] = ti
+            }
+        }
+
+        var length = 2
+        while (length <= n) {
+            val angle = (-2.0 * PI / length.toDouble()).toFloat()
+            val wLenR = cos(angle.toDouble()).toFloat()
+            val wLenI = sin(angle.toDouble()).toFloat()
+            val half = length shr 1
+
+            var i = 0
+            while (i < n) {
+                var wR = 1f
+                var wI = 0f
+                for (k in 0 until half) {
+                    val evenR = real[i + k]
+                    val evenI = imag[i + k]
+                    val oddR = real[i + k + half] * wR - imag[i + k + half] * wI
+                    val oddI = real[i + k + half] * wI + imag[i + k + half] * wR
+
+                    real[i + k] = evenR + oddR
+                    imag[i + k] = evenI + oddI
+                    real[i + k + half] = evenR - oddR
+                    imag[i + k + half] = evenI - oddI
+
+                    val nextWR = wR * wLenR - wI * wLenI
+                    wI = wR * wLenI + wI * wLenR
+                    wR = nextWR
+                }
+                i += length
+            }
+            length = length shl 1
+        }
     }
 
     /**
