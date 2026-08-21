@@ -14,6 +14,10 @@ import com.lowlatency.visualizer.NativeBridge
 import com.lowlatency.visualizer.ScreenSyncBus
 import kotlin.concurrent.thread
 import kotlin.math.abs
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 /**
  * Ties the Hue pipeline to the audio: takes a lightweight band snapshot from the
@@ -46,6 +50,15 @@ class HueLightController(context: Context) {
 
     // Each Hue channel keeps its own slowly changing RGB state.
     private var smoothedRgb = FloatArray(0)
+
+    // Creative state for screen+audio synthesis. All of these are owned by the
+    // sender thread, so the 50 Hz path stays allocation-free.
+    private var screenPaletteHue = 220f
+    private var screenPaletteSat = 0.5f
+    private var screenPaletteValue = 0.5f
+    private var beatWave = 0f
+    private var beatWaveDirection = 1f
+    private var impact = 0f
 
     @Volatile private var running = false
     @Volatile var paused = false        // true while app is backgrounded; sender drops to 1 Hz keepalive
@@ -328,13 +341,33 @@ class HueLightController(context: Context) {
                     // the spectrum bands.
                     val bc = audioBeatCount
                     if (bc != lastBeat) {
-                        // Beat controls a slower, visible colour/brightness pulse.
-                        // Keep the strongest pulse when beats arrive close together.
-                        flash = maxOf(flash, (audioLoudness * MAX_BEAT_PULSE).coerceIn(0f, MAX_BEAT_PULSE))
+                        // A beat starts a short spatial wave. Alternate its direction so
+                        // consecutive beats travel through the room rather than making every
+                        // lamp flash identically.
+                        flash = maxOf(
+                            flash,
+                            (audioLoudness * MAX_BEAT_PULSE).coerceIn(0f, MAX_BEAT_PULSE)
+                        )
+                        beatWaveDirection = if ((bc and 1) == 0) 1f else -1f
+                        beatWave = if (beatWaveDirection > 0f) 0f else (channelIds.size - 1).toFloat()
+
+                        // An impact needs both a beat and a strong spectral change. This keeps
+                        // ordinary kick drums smooth while making explosions/drops/snares pop.
+                        impact = maxOf(
+                            impact,
+                            (0.25f * audioLoudness + 0.75f * spectralFlux).coerceIn(0f, 1f)
+                        )
                         lastBeat = bc
                         lightBeatCount++
                     }
                     flash *= FLASH_DECAY
+                    impact *= IMPACT_DECAY
+                    if (channelIds.size > 1) {
+                        beatWave += beatWaveDirection * WAVE_SPEED
+                        if (beatWave > channelIds.size - 1f || beatWave < 0f) {
+                            beatWave = beatWave.coerceIn(0f, channelIds.size - 1f)
+                        }
+                    }
                     if (ScreenSyncBus.active &&
                         ScreenSyncBus.snapshotInto(screenRgb)
                     ) {
@@ -380,6 +413,15 @@ class HueLightController(context: Context) {
      * creative accent. Each light has its own zone and therefore its own
      * target colour.
      */
+    /**
+     * Cinematic screen+music mapper. The screen supplies the spatial identity and
+     * palette; music controls energy, movement and restrained colour evolution.
+     *
+     * Important design rule: audio never replaces the movie colour wholesale. It
+     * only gets more influence when the picture is neutral/dark or the soundtrack
+     * contains a strong transient. This prevents the old white/grey wash while still
+     * making the room feel alive.
+     */
     private fun mapScreenColors(
         count: Int,
         screen: FloatArray,
@@ -394,67 +436,129 @@ class HueLightController(context: Context) {
         flash: Float,
         out: FloatArray,
     ) {
-        if (smoothedRgb.size != count * 3) {
-            smoothedRgb = FloatArray(count * 3)
-        }
+        if (count <= 0) return
+        if (smoothedRgb.size != count * 3) smoothedRgb = FloatArray(count * 3)
 
-        // Screen RGB is authoritative for screen mirroring.
-        // Audio is used only to modulate brightness.
         val low = (band0 + band1).coerceAtLeast(0f)
         val mid = (band2 + band3).coerceAtLeast(0f)
         val high = (band4 + band5).coerceAtLeast(0f)
-
         val beat = flash.coerceIn(0f, MAX_BEAT_PULSE)
+        val transient = flux.coerceIn(0f, 1f)
 
-        val audioValue = LightingSettings.audioBrightnessValue(
-            low,
-            mid,
-            high,
-            flash
-        )
+        // Extract one slowly moving cinematic palette from all 12 screen zones.
+        // Saturated/visible zones carry more weight than black bars or UI chrome.
+        var hueX = 0.0
+        var hueY = 0.0
+        var satSum = 0f
+        var valueSum = 0f
+        var weightSum = 0f
+        for (zone in 0 until screen.size / 3) {
+            val src = zone * 3
+            val r = screen[src].coerceIn(0f, 1f)
+            val g = screen[src + 1].coerceIn(0f, 1f)
+            val b = screen[src + 2].coerceIn(0f, 1f)
+            rgbToHsv(r, g, b)
+            val v = hsvIn[2]
+            val sat = hsvIn[1]
+            val w = (0.15f + v * 0.85f) * (0.25f + sat * 0.75f)
+            val rad = Math.toRadians(hsvIn[0].toDouble())
+            hueX += cos(rad) * w
+            hueY += sin(rad) * w
+            satSum += sat * w
+            valueSum += v * w
+            weightSum += w
+        }
+        if (weightSum > 1e-5f) {
+            if (hueX * hueX + hueY * hueY > 1e-8) {
+                var targetHue = Math.toDegrees(atan2(hueY, hueX)).toFloat()
+                if (targetHue < 0f) targetHue += 360f
+                screenPaletteHue = normalizeHue(
+                    screenPaletteHue +
+                        shortestHueDelta(screenPaletteHue, targetHue) * PALETTE_SMOOTH
+                )
+            }
+            // Even a monochrome/black scene must update these values; otherwise a
+            // previous colourful scene could leak into the current neutral scene.
+            screenPaletteSat += PALETTE_SMOOTH * ((satSum / weightSum) - screenPaletteSat)
+            screenPaletteValue += PALETTE_SMOOTH * ((valueSum / weightSum) - screenPaletteValue)
+        }
+
+        val audioHue = spectralHue6(band0, band1, band2, band3, band4, band5)
+        val neutral = (1f - screenPaletteSat).coerceIn(0f, 1f)
+        val dark = (1f - screenPaletteValue).coerceIn(0f, 1f)
+        val audioColourWeight = (BASE_AUDIO_COLOUR + neutral * 0.16f + dark * 0.08f + transient * 0.08f)
+            .coerceIn(0.08f, 0.32f)
+        val accentWeight = (0.035f + transient * 0.055f).coerceIn(0.035f, 0.09f)
+        val audioValue = LightingSettings.audioBrightnessValue(low, mid, high, flash)
+        val paletteHue = screenPaletteHue
+        val accentHue = normalizeHue(paletteHue + 180f)
 
         for (i in 0 until count) {
             val zone = SCREEN_ZONE_ORDER[i % SCREEN_ZONE_ORDER.size]
             val src = zone * 3
             val dst = i * 3
 
-            val screenR = screen[src].coerceIn(0f, 1f)
-            val screenG = screen[src + 1].coerceIn(0f, 1f)
-            val screenB = screen[src + 2].coerceIn(0f, 1f)
+            val r = screen[src].coerceIn(0f, 1f)
+            val g = screen[src + 1].coerceIn(0f, 1f)
+            val b = screen[src + 2].coerceIn(0f, 1f)
+            rgbToHsv(r, g, b)
 
-            // Preserve the actual screen colour. Do not convert to HSV and
-            // replace the hue with the audio spectrum.
-            val screenValue = maxOf(screenR, screenG, screenB)
+            val localHue = hsvIn[0]
+            val localSat = hsvIn[1]
+            val localValue = hsvIn[2]
 
-            // Audio provides only a small brightness contribution.
-            val brightness = (
-                screenValue * 0.90f +
-                    audioValue * 0.10f
-            ).coerceIn(0.03f, 1f)
+            // Preserve local screen colour strongly. When a zone is neutral, pull it
+            // towards the cinematic palette; audio gets a little more say there.
+            val localAudioWeight = (audioColourWeight + (1f - localSat) * 0.08f).coerceIn(0.08f, 0.36f)
+            var hue = normalizeHue(
+                localHue + shortestHueDelta(localHue, audioHue) * localAudioWeight +
+                    shortestHueDelta(localHue, paletteHue) * (0.10f + neutral * 0.12f)
+            )
 
-            // Scale all RGB channels together so the original screen hue
-            // and saturation are preserved.
-            val scale = if (screenValue > 0.0001f) {
-                brightness / screenValue
-            } else {
-                0f
+            // A restrained complementary accent creates diversity between neighbouring
+            // lamps without turning the room into a rainbow.
+            if (count > 1 && ((i + zone) % 4 == 0)) {
+                hue = normalizeHue(hue + shortestHueDelta(hue, accentHue) * accentWeight)
             }
 
-            // Beat produces a modest brightness pulse without changing hue.
-            val beatMultiplier = 1f + beat * 0.12f
+            // Slow spatial colour drift: mid/treble moves the room gently, while flux
+            // adds only a small creative offset. Never jump the hue on ordinary frames.
+            val position = if (count > 1) i.toFloat() / (count - 1) else 0.5f
+            val spatialOffset = (position - 0.5f) * 18f
+            val musicalDrift = (high - low).coerceIn(-1f, 1f) * 10f +
+                transient * (if ((i and 1) == 0) 6f else -6f)
+            hue = normalizeHue(hue + spatialOffset + musicalDrift)
 
-            val r = (screenR * scale * beatMultiplier).coerceIn(0f, 1f)
-            val g = (screenG * scale * beatMultiplier).coerceIn(0f, 1f)
-            val b = (screenB * scale * beatMultiplier).coerceIn(0f, 1f)
+            // Keep cinematic saturation. Neutral frames become colourful only when the
+            // palette/music gives us enough information to justify it.
+            val saturation = (
+                localSat * 1.12f +
+                    screenPaletteSat * 0.10f +
+                    audioColourWeight * 0.16f +
+                    transient * 0.08f
+            ).coerceIn(0.38f, 0.98f)
 
-            // Existing smoothing remains in place to avoid dizziness/strobing.
-            smoothRgb(
-                dst,
-                r,
-                g,
-                b,
-                out
-            )
+            // Screen brightness remains dominant. Audio adds life; beat and impact are
+            // separate so normal loudness does not cause constant flashing.
+            val screenDrive = sqrt(localValue.coerceIn(0f, 1f))
+            val baseValue = (
+                screenDrive * 0.78f +
+                    audioValue * 0.14f +
+                    screenPaletteValue * 0.08f
+            ).coerceIn(0.025f, 1f)
+
+            // A beat travels through the physical light order. The wave is strongest
+            // near its moving front and fades smoothly instead of strobing all lights.
+            var wave = 0f
+            if (count > 1) {
+                val distance = abs(i.toFloat() - beatWave)
+                wave = (1f - distance / WAVE_WIDTH).coerceIn(0f, 1f)
+            }
+            val pulse = (beat * (0.55f + wave * 0.75f) + impact * 0.10f).coerceIn(0f, 0.32f)
+            val value = (baseValue * (1f + pulse) + transient * 0.025f).coerceIn(0.025f, 1f)
+
+            hsvToRgb(hue, saturation, value)
+            smoothRgb(dst, hsvOut[0], hsvOut[1], hsvOut[2], out)
         }
     }
 
@@ -509,8 +613,31 @@ class HueLightController(context: Context) {
      * spans warm, green/cyan and blue/magenta regions, so the soundtrack can
      * escape the old red->blue-only tonal range.
      */
+    private fun spectralHue6(
+        b0: Float, b1: Float, b2: Float, b3: Float, b4: Float, b5: Float
+    ): Float {
+        var x = 0.0
+        var y = 0.0
+        val w0 = b0.coerceAtLeast(0f).toDouble()
+        val w1 = b1.coerceAtLeast(0f).toDouble()
+        val w2 = b2.coerceAtLeast(0f).toDouble()
+        val w3 = b3.coerceAtLeast(0f).toDouble()
+        val w4 = b4.coerceAtLeast(0f).toDouble()
+        val w5 = b5.coerceAtLeast(0f).toDouble()
+        x += cos(HUE_BAND_RADIANS[0]) * w0; y += sin(HUE_BAND_RADIANS[0]) * w0
+        x += cos(HUE_BAND_RADIANS[1]) * w1; y += sin(HUE_BAND_RADIANS[1]) * w1
+        x += cos(HUE_BAND_RADIANS[2]) * w2; y += sin(HUE_BAND_RADIANS[2]) * w2
+        x += cos(HUE_BAND_RADIANS[3]) * w3; y += sin(HUE_BAND_RADIANS[3]) * w3
+        x += cos(HUE_BAND_RADIANS[4]) * w4; y += sin(HUE_BAND_RADIANS[4]) * w4
+        x += cos(HUE_BAND_RADIANS[5]) * w5; y += sin(HUE_BAND_RADIANS[5]) * w5
+        if (x * x + y * y < 1e-8) return 240f
+        var h = Math.toDegrees(atan2(y, x)).toFloat()
+        if (h < 0f) h += 360f
+        return h
+    }
+
     private fun spectralHue(bands: FloatArray): Float {
-        val hues = floatArrayOf(8f, 42f, 105f, 180f, 245f, 315f)
+        val hues = HUE_BANDS
         var x = 0.0
         var y = 0.0
         for (i in bands.indices) {
@@ -588,13 +715,23 @@ class HueLightController(context: Context) {
         private const val AUDIO_HUE_BASS = 360f     // bass-heavy => red
         private const val AUDIO_HUE_TREBLE = 220f   // treble-heavy => blue
         private const val AUDIO_SAT = 0.92f
-        private const val COLOR_SMOOTH = 0.065f     // ~0.31 s response at 50 Hz
+        private const val COLOR_SMOOTH = 0.085f     // ~0.23 s response at 50 Hz
+        private const val PALETTE_SMOOTH = 0.035f   // ~0.56 s cinematic palette inertia
+        private const val BASE_AUDIO_COLOUR = 0.10f
         private const val MAX_BEAT_PULSE = 0.16f
+        private const val IMPACT_DECAY = 0.90f
+        private const val WAVE_SPEED = 0.38f       // light indices per 20 ms frame
+        private const val WAVE_WIDTH = 1.65f
 
         // Physical-light order around a TV-like arrangement: top row, right side,
         // bottom row, left side, then centre cells. Each light therefore samples
         // a genuinely different part of the complete frame.
         private val SCREEN_ZONE_ORDER = intArrayOf(0, 1, 2, 3, 7, 11, 10, 9, 8, 4, 5, 6)
         private val ZONE_HUE_PHASES = floatArrayOf(-22f, 14f, -12f, 24f, -18f, 18f, -28f, 12f, -15f, 20f, -10f, 16f)
+        private val HUE_BANDS = doubleArrayOf(8.0, 42.0, 105.0, 180.0, 245.0, 315.0)
+        private val HUE_BAND_RADIANS = doubleArrayOf(
+            Math.toRadians(8.0), Math.toRadians(42.0), Math.toRadians(105.0),
+            Math.toRadians(180.0), Math.toRadians(245.0), Math.toRadians(315.0)
+        )
     }
 }
